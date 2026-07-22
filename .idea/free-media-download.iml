@@ -2,17 +2,18 @@
 <module type="PYTHON_MODULE" version="4">
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
-      <sourceFolder url="file://$MODULE_DIR$/api" isTestSource="false" />
-      <excludeFolder url="file://$MODULE_DIR$/.venv" />
-      <excludeFolder url="file://$MODULE_DIR$/api/.venv" />
+      <sourceFolder url="file://$MODULE_DIR$/free-media-download-backend" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/free-media-download-backend/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/free-media-download-backend/.venv-py313-legacy" />
+      <excludeFolder url="file://$MODULE_DIR$/free-media-download-frontend/node_modules" />
     </content>
-    <orderEntry type="jdk" jdkName="~/myProject/free-media-download/.venv" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="~/myProject/free-media-download/free-media-download-backend/.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
   <component name="TemplatesService">
     <option name="TEMPLATE_FOLDERS">
       <list>
-        <option value="$MODULE_DIR$/node_modules/wrangler/templates" />
+        <option value="$MODULE_DIR$/free-media-download-frontend/node_modules/wrangler/templates" />
       </list>
     </option>
   </component>

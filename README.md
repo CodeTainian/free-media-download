@@ -11,10 +11,12 @@ It does **not** accept cookies from API clients or bypass DRM, paywalls, private
 
 Catalog inclusion means SaveBolt safely accepts the URL and delegates it to the pinned dedicated yt-dlp extractor. It is not a guarantee that every link works: login, DRM, region, IP reputation, extractor regressions, and site changes still apply. The current live-test matrix and known gaps are in [`docs/platform-compatibility.md`](docs/platform-compatibility.md).
 
+The completed video-download MVP, its engineering decisions, validation evidence, known limits, and recommended next-stage plan are summarized in [`docs/mvp-video-download-handoff.md`](docs/mvp-video-download-handoff.md).
+
 ## Architecture
 
-- `app/` — anonymous React/TypeScript product site built with vinext
-- `api/` — FastAPI service that wraps pinned upstream `yt-dlp` and FFmpeg binaries without shell execution
+- `free-media-download-frontend/` — anonymous React/TypeScript product site built with vinext
+- `free-media-download-backend/` — FastAPI service that wraps pinned upstream `yt-dlp` and FFmpeg binaries without shell execution
 - `docker-compose.yml` — local web, API, health checks, and temporary job volume
 
 The API accepts only server-defined presets. Platform URLs are passed to pinned `yt-dlp==2026.7.4` without a shell and with the generic extractor disabled. The API image also carries the pinned Node 24 runtime required by current yt-dlp YouTube extraction and Chromium for isolated anonymous Douyin sessions. Public direct-media links use a separate downloader that validates and pins public DNS results for every redirect, blocking loopback, private, link-local, reserved, and cloud-metadata destinations.
@@ -36,6 +38,7 @@ Open `http://localhost:3000`. The API health endpoint is available at `http://lo
 The frontend requires Node.js 22.13 or newer:
 
 ```bash
+cd free-media-download-frontend
 npm install
 npm run dev
 ```
@@ -43,9 +46,10 @@ npm run dev
 For the API, use Python 3.12 with `yt-dlp` and FFmpeg available:
 
 ```bash
-python3.12 -m venv api/.venv
-api/.venv/bin/pip install -r api/requirements-dev.txt
-PYTHONPATH=api api/.venv/bin/uvicorn app.main:app --reload --port 8000
+cd free-media-download-backend
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+PATH="$PWD/.venv/bin:$PATH" PYTHONPATH=. .venv/bin/uvicorn app.main:app --reload --port 8000
 ```
 
 ### Automatic Douyin session
@@ -59,25 +63,26 @@ Chrome is auto-detected on macOS; the Docker API image includes Chromium. Set `S
 If another selected platform asks for a fresh browser session, or if an operator prefers to override the automatic Douyin session, stop the API and restart it as the same OS user that owns the browser profile:
 
 ```bash
+cd free-media-download-backend
 SAVEBOLT_COOKIES_FROM_BROWSER=firefox \
 SAVEBOLT_COOKIE_PLATFORMS=youtube,douyin,ixigua \
 SAVEBOLT_YTDLP_USER_AGENT='Mozilla/5.0 ...' \
-PYTHONPATH=api api/.venv/bin/uvicorn app.main:app --reload --port 8000
+PATH="$PWD/.venv/bin:$PATH" PYTHONPATH=. .venv/bin/uvicorn app.main:app --reload --port 8000
 ```
 
 `firefox` can be replaced with another browser supported by yt-dlp, such as `chrome` or `safari`. Keep `SAVEBOLT_COOKIE_PLATFORMS` to the smallest necessary set. For a container, export a fresh Netscape-format file, mount it read-only, and set `SAVEBOLT_COOKIES_FILE`; never configure both cookie sources. Do not mount a personal browser profile into a public/shared container or commit cookie files. Some anti-bot systems require cookies, the matching browser user agent, and the downloader to use the same public IP.
 
 An explicit cookie source configured for `douyin` takes priority over automatic anonymous sessions. The API returns explicit retryable errors for browser startup failures, missing/expired cookies, rejected network addresses, rate limits, and YouTube bot checks. Successful probes are cached in memory for five minutes by default, and concurrent probes for the exact same URL share one upstream request.
 
-When using the project-local virtual environment, ensure `api/.venv/bin` is on `PATH` so the API health check and subprocess runner can find the pinned `yt-dlp` executable. The development requirements include a pinned FFmpeg binary fallback for machines without a system installation; the Docker image continues to use Debian's FFmpeg package.
+When using the project-local virtual environment, ensure `free-media-download-backend/.venv/bin` is on `PATH` so the API health check and subprocess runner can find the pinned `yt-dlp` executable. The development requirements include a pinned FFmpeg binary fallback for machines without a system installation; the Docker image continues to use Debian's FFmpeg package.
 
-Copy `.env.example` to `.env.local` only when overriding defaults.
+Frontend and backend configuration examples live in their respective project directories. Copy `free-media-download-frontend/.env.example` to `.env.local` for frontend overrides; load backend values from `free-media-download-backend/.env.example` into the API process environment only when needed.
 
 ## Validation
 
 ```bash
-npm test
-PYTHONPATH=api api/.venv/bin/pytest api/tests
+npm --prefix free-media-download-frontend test
+PYTHONPATH=free-media-download-backend free-media-download-backend/.venv/bin/pytest free-media-download-backend/tests
 docker compose config
 ```
 
@@ -85,7 +90,7 @@ The automated suites cover URL allowlisting and SSRF protection, similar-domain 
 
 ## Runtime limits
 
-All limits can be adjusted through environment variables; defaults are 10 items per batch, 2 GB per file, 4 GB per ZIP, six hours per media item, a 30-second probe timeout, a five-minute successful-probe cache, a one-hour processing timeout, two concurrent items, and 30-minute retention. See [`.env.example`](.env.example) for the deployment-facing values.
+All limits can be adjusted through environment variables; defaults are 10 items per batch, 2 GB per file, 4 GB per ZIP, six hours per media item, a 30-second probe timeout, a five-minute successful-probe cache, a one-hour processing timeout, two concurrent items, and 30-minute retention. See the [backend environment example](free-media-download-backend/.env.example) for the deployment-facing values.
 
 Third-party licensing is documented in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 

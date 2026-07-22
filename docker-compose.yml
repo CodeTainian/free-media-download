@@ -1,7 +1,7 @@
 services:
   api:
     build:
-      context: ./api
+      context: ./free-media-download-backend
     environment:
       SAVEBOLT_DATA_DIR: /data/jobs
       SAVEBOLT_CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
@@ -28,8 +28,7 @@ services:
 
   web:
     build:
-      context: .
-      dockerfile: Dockerfile.web
+      context: ./free-media-download-frontend
       args:
         NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
     depends_on:
