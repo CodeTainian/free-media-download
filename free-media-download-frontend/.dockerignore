@@ -1,0 +1,8 @@
+node_modules
+dist
+.vinext
+.next
+.wrangler
+.git
+secrets
+*.cookies.txt
