@@ -2,7 +2,14 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.main import MemoryRateLimiter, app, downloader, jobs, limiter
+from app.main import (
+    MemoryRateLimiter,
+    app,
+    downloader,
+    impersonation_target_available,
+    jobs,
+    limiter,
+)
 from app.downloader import DownloadError
 from app.models import MediaItem, OutputKind, Preset, ProbeResponse
 
@@ -25,7 +32,23 @@ def test_health_has_stable_shape():
     with TestClient(app) as client:
         response = client.get("/api/v1/health")
     assert response.status_code == 200
-    assert set(response.json()) >= {"status", "api", "yt_dlp", "ffmpeg"}
+    assert set(response.json()) >= {
+        "status",
+        "api",
+        "yt_dlp",
+        "ffmpeg",
+        "anonymous_browser",
+        "request_impersonation",
+    }
+
+
+def test_health_detects_missing_request_impersonation_dependency():
+    unavailable = "Client OS Source\nChrome - curl_cffi (unavailable)\n"
+    available = "Client OS Source\nChrome-136 Macos-15 curl_cffi\n"
+
+    assert impersonation_target_available(unavailable, "chrome") is False
+    assert impersonation_target_available(available, "chrome") is True
+    assert impersonation_target_available(None, None) is True
 
 
 def test_probe_endpoint(monkeypatch):
@@ -58,6 +81,25 @@ def test_youtube_bot_check_has_retryable_public_error(monkeypatch):
     assert response.status_code == 503
     assert response.json()["code"] == "YOUTUBE_BOT_CHECK"
     assert response.json()["retryable"] is True
+
+
+def test_cookie_requirement_has_retryable_service_error(monkeypatch):
+    async def fake_probe(_url):
+        raise DownloadError("COOKIE_REQUIRED", "Refresh the configured cookies.", True)
+
+    monkeypatch.setattr(downloader, "probe", fake_probe)
+    limiter.events.clear()
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/media/probe",
+            json={"url": "https://www.douyin.com/video/public"},
+        )
+    assert response.status_code == 503
+    assert response.json() == {
+        "code": "COOKIE_REQUIRED",
+        "message": "Refresh the configured cookies.",
+        "retryable": True,
+    }
 
 
 def test_rejects_similar_domain_before_job_creation():

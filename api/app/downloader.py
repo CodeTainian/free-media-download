@@ -10,14 +10,21 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
+from urllib.request import getproxies
 
 import aiohttp
 
+from .browser_session import (
+    AnonymousBrowserSessionManager,
+    BrowserSessionError,
+    BrowserUnavailableError,
+)
 from .config import Settings
 from .models import MediaItem, OutputKind, Preset, ProbeResponse
 from .security import (
     UnsafeUrlError,
     classify_url,
+    is_short_platform_url,
     parse_public_http_url,
     resolve_public_host,
     safe_filename,
@@ -83,7 +90,11 @@ def _build_presets(info: dict[str, object], direct: bool = False) -> list[Preset
         and isinstance(item.get("height"), (int, float))
         and item.get("vcodec") not in {None, "none"}
     }
-    choices = [value for value in (2160, 1440, 1080, 720, 480, 360) if any(height >= value for height in heights)]
+    choices = [
+        value
+        for value in (2160, 1440, 1080, 720, 480, 360)
+        if heights and min(heights) <= value <= max(heights)
+    ]
     presets: list[Preset] = [
         Preset(
             id="best",
@@ -96,8 +107,8 @@ def _build_presets(info: dict[str, object], direct: bool = False) -> list[Preset
     presets.extend(
         Preset(
             id=f"mp4-{height}",
-            label=f"{height}p MP4",
-            detail="Mobile-compatible video",
+            label=f"Up to {height}p MP4",
+            detail=f"Best source at or below {height}p",
             kind=OutputKind.VIDEO,
             extension="mp4",
             height=height,
@@ -132,6 +143,14 @@ def _normalize_info(info: dict[str, object], source_url: str, playlist_item: boo
 
 def map_process_error(stderr: str) -> DownloadError:
     text = stderr.lower()
+    if "impersonate target" in text and (
+        "not available" in text or "missing dependencies" in text
+    ):
+        return DownloadError(
+            "IMPERSONATION_UNAVAILABLE",
+            "Browser request impersonation is unavailable. Install the pinned API dependencies and restart the service.",
+            True,
+        )
     bot_check_markers = (
         "confirm you're not a bot",
         "confirm you’re not a bot",
@@ -143,6 +162,28 @@ def map_process_error(stderr: str) -> DownloadError:
             "YOUTUBE_BOT_CHECK",
             "YouTube is temporarily requiring bot verification. Please wait a while and try again.",
             True,
+        )
+    cookie_markers = (
+        "fresh cookies",
+        "cookies (not necessarily logged in) are needed",
+        "cookies are needed",
+    )
+    if any(marker in text for marker in cookie_markers):
+        return DownloadError(
+            "COOKIE_REQUIRED",
+            "This platform requires a fresh server-side browser session. Refresh the configured cookies and try again.",
+            True,
+        )
+    if "your ip address is blocked" in text or "ip address has been blocked" in text:
+        return DownloadError(
+            "PLATFORM_ACCESS_BLOCKED",
+            "The source platform is blocking the downloader's current network address.",
+            True,
+        )
+    if "phantomjs not found" in text:
+        return DownloadError(
+            "RUNTIME_UNAVAILABLE",
+            "This extractor requires the unsupported PhantomJS runtime and is not available in this deployment.",
         )
     if "video unavailable" in text:
         return DownloadError(
@@ -157,10 +198,28 @@ def map_process_error(stderr: str) -> DownloadError:
         return DownloadError("REGION_BLOCKED", "This media is not available from the downloader's region.")
     if "429" in text or "too many requests" in text:
         return DownloadError("RATE_LIMITED", "The source platform is temporarily rate limiting requests.", True)
+    if "http error 403" in text or "forbidden" in text:
+        return DownloadError(
+            "PLATFORM_ACCESS_BLOCKED",
+            "The source platform rejected this server session. Refresh server-side cookies or try again later.",
+            True,
+        )
     if "max-filesize" in text or "larger than max-filesize" in text:
         return DownloadError("FILE_TOO_LARGE", "This media exceeds the 2 GB file limit.")
-    if "unsupported url" in text:
+    if "unsupported url" in text or "no suitable extractor found" in text:
         return DownloadError("UNSUPPORTED_URL", "This link is not supported by the selected platform extractor.")
+    if "requested format is not available" in text:
+        return DownloadError(
+            "FORMAT_UNAVAILABLE",
+            "The selected quality is no longer available for this media. Analyze the link again.",
+            True,
+        )
+    if "no video formats found" in text or "can't find any video" in text:
+        return DownloadError(
+            "NO_MEDIA",
+            "The platform page was found, but its extractor did not return downloadable media.",
+            True,
+        )
     return DownloadError("DOWNLOAD_FAILED", "The source platform could not prepare this media right now.", True)
 
 
@@ -181,11 +240,22 @@ async def terminate_process(process: asyncio.subprocess.Process) -> None:
 
 
 class YtDlpService:
-    def __init__(self, config: Settings):
+    def __init__(
+        self,
+        config: Settings,
+        browser_sessions: AnonymousBrowserSessionManager | None = None,
+    ):
         self.config = config
+        self._browser_sessions = browser_sessions or AnonymousBrowserSessionManager(config)
         self._probe_cache: dict[str, tuple[float, ProbeResponse]] = {}
         self._probe_inflight: dict[str, asyncio.Task[ProbeResponse]] = {}
         self._probe_cache_lock = asyncio.Lock()
+
+    async def close(self) -> None:
+        await self._browser_sessions.close()
+
+    def anonymous_browser_available(self) -> bool:
+        return self._browser_sessions.available()
 
     async def probe(self, raw_url: str) -> ProbeResponse:
         platform, normalized = classify_url(raw_url)
@@ -237,41 +307,19 @@ class YtDlpService:
             except aiohttp.ClientError as exc:
                 raise DownloadError("SOURCE_ERROR", "The public media host could not be reached.", True) from exc
 
-        command = [
-            self.config.yt_dlp_binary,
-            "--dump-single-json",
-            "--skip-download",
-            "--no-warnings",
-            "--no-colors",
-            "--ignore-config",
-            "--playlist-end",
-            str(self.config.max_batch_items),
-            "--use-extractors",
-            "default,-generic",
-            "--js-runtimes",
-            self.config.yt_dlp_js_runtime,
-        ]
-        command.extend(self._youtube_auth_args(platform))
-        command.append(normalized)
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-        except FileNotFoundError as exc:
-            raise DownloadError("SERVICE_UNAVAILABLE", "The media engine is not installed.", True) from exc
+        normalized = await self._expand_short_url(platform, normalized)
 
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self.config.probe_timeout_seconds
-            )
-        except TimeoutError as exc:
-            await terminate_process(process)
-            raise DownloadError("PROBE_TIMEOUT", "The source platform took too long to respond.", True) from exc
-        if process.returncode:
-            raise map_process_error(stderr.decode("utf-8", "replace"))
+        stdout, stderr, returncode = await self._run_probe_process(platform, normalized)
+        if returncode:
+            error = map_process_error(stderr.decode("utf-8", "replace"))
+            if error.code == "COOKIE_REQUIRED" and self._uses_managed_session(platform):
+                stdout, stderr, returncode = await self._run_probe_process(
+                    platform, normalized, force_session=True
+                )
+                if returncode:
+                    raise map_process_error(stderr.decode("utf-8", "replace"))
+            else:
+                raise error
 
         try:
             payload = json.loads(stdout.decode("utf-8"))
@@ -295,6 +343,49 @@ class YtDlpService:
             if item.duration and item.duration > self.config.max_duration_seconds:
                 raise DownloadError("MEDIA_TOO_LONG", "This media exceeds the six-hour duration limit.")
         return ProbeResponse(items=items, truncated=truncated)
+
+    async def _run_probe_process(
+        self,
+        platform: str,
+        normalized: str,
+        force_session: bool = False,
+    ) -> tuple[bytes, bytes, int]:
+        command = [
+            self.config.yt_dlp_binary,
+            "--dump-single-json",
+            "--skip-download",
+            "--no-warnings",
+            "--no-colors",
+            "--ignore-config",
+            "--playlist-end",
+            str(self.config.max_batch_items),
+            "--use-extractors",
+            "default,-generic",
+            "--js-runtimes",
+            self.config.yt_dlp_js_runtime,
+        ]
+        command.extend(
+            await self._resolved_platform_args(platform, normalized, force_session=force_session)
+        )
+        command.append(normalized)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise DownloadError("SERVICE_UNAVAILABLE", "The media engine is not installed.", True) from exc
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=self.config.probe_timeout_seconds
+            )
+        except TimeoutError as exc:
+            await terminate_process(process)
+            raise DownloadError("PROBE_TIMEOUT", "The source platform took too long to respond.", True) from exc
+        return stdout, stderr, int(process.returncode or 0)
 
     async def _probe_direct(self, normalized: str) -> ProbeResponse:
         final_url, headers = await self._direct_headers(normalized)
@@ -363,18 +454,153 @@ class YtDlpService:
                 raise DownloadError("DOWNLOAD_TIMEOUT", "The public media host took too long to respond.", True) from exc
             except aiohttp.ClientError as exc:
                 raise DownloadError("SOURCE_ERROR", "The public media host could not be reached.", True) from exc
+        normalized = await self._expand_short_url(platform, normalized)
         if not binary_available(self.config.ffmpeg_binary):
             raise DownloadError(
                 "SERVICE_UNAVAILABLE",
                 "FFmpeg is not available, so this platform download cannot be merged safely.",
                 True,
             )
-        return await self._download_platform(platform, normalized, preset_id, output_dir, cancel_event, progress)
+        platform_args = await self._resolved_platform_args(platform, normalized)
+        return await self._download_platform(
+            platform,
+            normalized,
+            preset_id,
+            output_dir,
+            cancel_event,
+            progress,
+            platform_args,
+        )
 
-    def _youtube_auth_args(self, platform: str) -> list[str]:
-        if platform == "youtube" and self.config.cookies_from_browser:
-            return ["--cookies-from-browser", self.config.cookies_from_browser]
-        return []
+    def _platform_args(self, platform: str) -> list[str]:
+        args: list[str] = []
+        if self.config.yt_dlp_proxy:
+            args.extend(["--proxy", self.config.yt_dlp_proxy])
+        if self.config.yt_dlp_user_agent:
+            args.extend(["--user-agent", self.config.yt_dlp_user_agent])
+        if platform not in self.config.cookie_platforms:
+            return args
+        if self.config.cookies_from_browser:
+            args.extend(["--cookies-from-browser", self.config.cookies_from_browser])
+        elif self.config.cookies_file:
+            if not self.config.cookies_file.is_file():
+                raise DownloadError(
+                    "COOKIE_SOURCE_ERROR",
+                    "The configured server-side cookie file is unavailable.",
+                    True,
+                )
+            args.extend(["--cookies", str(self.config.cookies_file)])
+        return args
+
+    def _uses_managed_session(self, platform: str) -> bool:
+        if not self.config.anonymous_browser_cookies or platform != "douyin":
+            return False
+        has_configured_cookie = platform in self.config.cookie_platforms and bool(
+            self.config.cookies_from_browser or self.config.cookies_file
+        )
+        return not has_configured_cookie
+
+    async def _resolved_platform_args(
+        self,
+        platform: str,
+        normalized: str,
+        force_session: bool = False,
+    ) -> list[str]:
+        args = self._platform_args(platform)
+        if not self._uses_managed_session(platform):
+            return args
+        try:
+            session = await self._browser_sessions.ensure(platform, normalized, force=force_session)
+        except BrowserUnavailableError as exc:
+            raise DownloadError(
+                "BROWSER_UNAVAILABLE",
+                "Automatic anonymous session refresh requires Chromium on the API server.",
+                True,
+            ) from exc
+        except BrowserSessionError as exc:
+            raise DownloadError(
+                "COOKIE_REFRESH_FAILED",
+                "The API could not refresh the platform's anonymous browser session.",
+                True,
+            ) from exc
+        if not session:
+            return args
+        if self.config.browser_impersonate:
+            args.extend(["--impersonate", self.config.browser_impersonate])
+        args.extend(["--user-agent", session.user_agent, "--cookies", str(session.cookies_file)])
+        return args
+
+    async def _expand_short_url(self, platform: str, normalized: str) -> str:
+        if not is_short_platform_url(normalized):
+            return normalized
+
+        resolver = PublicResolver()
+        configured_proxy = self.config.yt_dlp_proxy
+        proxy_scheme = urlsplit(configured_proxy).scheme if configured_proxy else ""
+        request_proxy = configured_proxy if proxy_scheme in {"http", "https"} else None
+        environment_proxies = getproxies() if not configured_proxy else {}
+        environment_proxy = environment_proxies.get(urlsplit(normalized).scheme)
+        uses_http_proxy = bool(request_proxy or environment_proxy)
+        connector = aiohttp.TCPConnector(
+            resolver=None if uses_http_proxy else resolver,
+            ttl_dns_cache=0,
+        )
+        timeout = aiohttp.ClientTimeout(total=self.config.probe_timeout_seconds)
+        current = normalized
+        headers = {
+            "User-Agent": self.config.yt_dlp_user_agent
+            or "Mozilla/5.0 (compatible; SaveBolt/0.1; +https://localhost)",
+        }
+        try:
+            async with aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout,
+                trust_env=bool(environment_proxy),
+            ) as session:
+                for _ in range(5):
+                    current, host, port = parse_public_http_url(current)
+                    if uses_http_proxy:
+                        await resolve_public_host(host, port)
+                    else:
+                        await resolver.pin(host, port)
+                    async with session.get(
+                        current,
+                        headers=headers,
+                        allow_redirects=False,
+                        proxy=request_proxy,
+                    ) as response:
+                        if response.status not in {301, 302, 303, 307, 308}:
+                            raise DownloadError(
+                                "UNSUPPORTED_URL",
+                                "The platform short link could not be expanded to a supported media page.",
+                                True,
+                            )
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise DownloadError(
+                                "INVALID_REDIRECT",
+                                "The platform short link returned an invalid redirect.",
+                            )
+                        candidate = urljoin(current, location)
+                        candidate_platform, candidate = classify_url(candidate)
+                        if candidate_platform != platform:
+                            raise UnsafeUrlError(
+                                "The platform short link redirected outside its supported platform."
+                            )
+                        if not is_short_platform_url(candidate):
+                            return candidate
+                        current = candidate
+        except (UnsafeUrlError, DownloadError):
+            raise
+        except TimeoutError as exc:
+            raise DownloadError(
+                "PROBE_TIMEOUT", "The platform short link took too long to respond.", True
+            ) from exc
+        except aiohttp.ClientError as exc:
+            raise DownloadError(
+                "SOURCE_ERROR", "The platform short link could not be reached.", True
+            ) from exc
+        raise DownloadError("TOO_MANY_REDIRECTS", "The platform short link redirected too many times.")
 
     async def _download_platform(
         self,
@@ -384,6 +610,7 @@ class YtDlpService:
         output_dir: Path,
         cancel_event: asyncio.Event,
         progress: ProgressCallback,
+        platform_args: list[str],
     ) -> Path:
         template = str(output_dir / "%(title).120B [%(id)s].%(ext)s")
         command = [
@@ -408,7 +635,7 @@ class YtDlpService:
             "-o",
             template,
         ]
-        command.extend(self._youtube_auth_args(platform))
+        command.extend(platform_args)
         if preset_id == "mp3":
             command.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
         elif preset_id == "best":

@@ -21,6 +21,8 @@
 # misc
 .DS_Store
 *.pem
+*.cookies.txt
+/secrets/
 
 # debug
 npm-debug.log*

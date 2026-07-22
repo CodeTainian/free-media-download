@@ -5,10 +5,12 @@ FROM python:3.12.11-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    SAVEBOLT_DATA_DIR=/data/jobs
+    SAVEBOLT_DATA_DIR=/data/jobs \
+    SAVEBOLT_BROWSER_BINARY=/usr/bin/chromium \
+    SAVEBOLT_BROWSER_NO_SANDBOX=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates chromium \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=javascript-runtime /usr/local/bin/node /usr/local/bin/node

@@ -52,6 +52,7 @@ async def lifespan(_: FastAPI):
     jobs.start()
     yield
     await jobs.stop()
+    await downloader.close()
 
 
 app = FastAPI(
@@ -94,7 +95,22 @@ async def unsafe_url_error(_: Request, exc: UnsafeUrlError):
 
 @app.exception_handler(DownloadError)
 async def download_error(_: Request, exc: DownloadError):
-    status = 503 if exc.code in {"SERVICE_UNAVAILABLE", "YOUTUBE_BOT_CHECK"} else 422
+    status = (
+        503
+        if exc.code
+        in {
+            "COOKIE_REQUIRED",
+            "COOKIE_REFRESH_FAILED",
+            "COOKIE_SOURCE_ERROR",
+            "BROWSER_UNAVAILABLE",
+            "IMPERSONATION_UNAVAILABLE",
+            "PLATFORM_ACCESS_BLOCKED",
+            "RUNTIME_UNAVAILABLE",
+            "SERVICE_UNAVAILABLE",
+            "YOUTUBE_BOT_CHECK",
+        }
+        else 422
+    )
     return error_response(status, exc.code, exc.message, exc.retryable)
 
 
@@ -102,7 +118,7 @@ def client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-async def command_version(command: list[str]) -> str | None:
+async def command_output(command: list[str]) -> str | None:
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -111,10 +127,25 @@ async def command_version(command: list[str]) -> str | None:
         )
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=4)
         if process.returncode == 0:
-            return stdout.decode("utf-8", "replace").splitlines()[0][:120]
+            return stdout.decode("utf-8", "replace")
     except (FileNotFoundError, TimeoutError):
         return None
     return None
+
+
+def impersonation_target_available(output: str | None, target: str | None) -> bool:
+    if not target:
+        return True
+    if not output:
+        return False
+    client = target.split(":", 1)[0].lower()
+    return any(
+        fields
+        and fields[0].startswith(client)
+        and "unavailable" not in line.lower()
+        for line in output.splitlines()
+        if (fields := line.lower().split())
+    )
 
 
 @app.get("/api/v1/health", response_model=HealthResponse)
@@ -122,13 +153,35 @@ async def health() -> HealthResponse:
     yt_ready = binary_available(settings.yt_dlp_binary)
     ffmpeg_ready = binary_available(settings.ffmpeg_binary)
     javascript_ready = binary_available(settings.yt_dlp_js_runtime.split(":", 1)[0])
-    version = await command_version([settings.yt_dlp_binary, "--version"]) if yt_ready else None
+    browser_ready = downloader.anonymous_browser_available()
+    version_output = (
+        await command_output([settings.yt_dlp_binary, "--version"]) if yt_ready else None
+    )
+    impersonation_output = (
+        await command_output([settings.yt_dlp_binary, "--list-impersonate-targets"])
+        if yt_ready and settings.anonymous_browser_cookies
+        else None
+    )
+    impersonation_ready = impersonation_target_available(
+        impersonation_output, settings.browser_impersonate
+    )
+    version = version_output.splitlines()[0][:120] if version_output else None
     return HealthResponse(
-        status="ok" if yt_ready and ffmpeg_ready and javascript_ready else "degraded",
+        status=(
+            "ok"
+            if yt_ready
+            and ffmpeg_ready
+            and javascript_ready
+            and (browser_ready or not settings.anonymous_browser_cookies)
+            and (impersonation_ready or not settings.anonymous_browser_cookies)
+            else "degraded"
+        ),
         api=True,
         yt_dlp=yt_ready,
         ffmpeg=ffmpeg_ready,
         javascript_runtime=javascript_ready,
+        anonymous_browser=browser_ready,
+        request_impersonation=impersonation_ready,
         yt_dlp_version=version,
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -12,6 +13,13 @@ def _int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _bool(name: str, default: bool) -> bool:
+    configured = os.getenv(name)
+    if configured is None:
+        return default
+    return configured.strip().lower() in {"1", "true", "yes", "on"}
 
 
 SUPPORTED_COOKIE_BROWSERS = frozenset(
@@ -27,6 +35,23 @@ def _cookies_from_browser() -> str | None:
         supported = ", ".join(sorted(SUPPORTED_COOKIE_BROWSERS))
         raise ValueError(f"SAVEBOLT_COOKIES_FROM_BROWSER must be one of: {supported}")
     return configured
+
+
+def _optional_path(name: str) -> Path | None:
+    configured = os.getenv(name, "").strip()
+    return Path(configured).expanduser() if configured else None
+
+
+def _cookie_platforms() -> frozenset[str]:
+    configured = os.getenv("SAVEBOLT_COOKIE_PLATFORMS", "youtube")
+    platforms = frozenset(value.strip().lower() for value in configured.split(",") if value.strip())
+    if any(not re.fullmatch(r"[a-z0-9-]+", platform) for platform in platforms):
+        raise ValueError("SAVEBOLT_COOKIE_PLATFORMS must contain comma-separated platform keys")
+    return platforms
+
+
+def _optional_text(name: str) -> str | None:
+    return os.getenv(name, "").strip() or None
 
 
 def _ffmpeg_binary() -> str:
@@ -64,6 +89,19 @@ class Settings:
     ffmpeg_binary: str = _ffmpeg_binary()
     yt_dlp_js_runtime: str = os.getenv("SAVEBOLT_YTDLP_JS_RUNTIME", "node")
     cookies_from_browser: str | None = _cookies_from_browser()
+    cookies_file: Path | None = _optional_path("SAVEBOLT_COOKIES_FILE")
+    cookie_platforms: frozenset[str] = _cookie_platforms()
+    yt_dlp_user_agent: str | None = _optional_text("SAVEBOLT_YTDLP_USER_AGENT")
+    yt_dlp_proxy: str | None = _optional_text("SAVEBOLT_YTDLP_PROXY")
+    anonymous_browser_cookies: bool = _bool("SAVEBOLT_ANONYMOUS_BROWSER_COOKIES", True)
+    browser_binary: str | None = _optional_text("SAVEBOLT_BROWSER_BINARY")
+    browser_no_sandbox: bool = _bool("SAVEBOLT_BROWSER_NO_SANDBOX", False)
+    browser_impersonate: str | None = (
+        os.getenv("SAVEBOLT_BROWSER_IMPERSONATE", "chrome").strip() or None
+    )
+    browser_session_ttl_seconds: int = _int("SAVEBOLT_BROWSER_SESSION_TTL_SECONDS", 20 * 60)
+    browser_cookie_wait_seconds: int = _int("SAVEBOLT_BROWSER_COOKIE_WAIT_SECONDS", 20)
+    browser_start_timeout_seconds: int = _int("SAVEBOLT_BROWSER_START_TIMEOUT_SECONDS", 20)
     cors_origins: tuple[str, ...] = tuple(
         value.strip()
         for value in os.getenv(
@@ -72,6 +110,12 @@ class Settings:
         ).split(",")
         if value.strip()
     )
+
+    def __post_init__(self) -> None:
+        if self.cookies_from_browser and self.cookies_file:
+            raise ValueError(
+                "Configure either SAVEBOLT_COOKIES_FROM_BROWSER or SAVEBOLT_COOKIES_FILE, not both"
+            )
 
 
 settings = Settings()

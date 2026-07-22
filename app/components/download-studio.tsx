@@ -61,7 +61,22 @@ type Job = {
 };
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
-const platforms = ["YouTube", "TikTok", "Instagram", "X", "Facebook", "Reddit", "Vimeo", "Bilibili"];
+const platforms = [
+  "YouTube",
+  "Bilibili",
+  "Douyin",
+  "Xiaohongshu",
+  "Weibo",
+  "Tencent Video",
+  "Youku",
+  "Mango TV",
+  "TikTok",
+  "Instagram",
+  "Facebook",
+  "X",
+  "Reddit",
+  "Vimeo",
+];
 const eventNames = [
   "queued",
   "started",
@@ -488,7 +503,7 @@ export function DownloadStudio() {
         <div className="section-heading"><span className="eyebrow dark">THE HONEST ANSWERS</span><h2>Before you paste.</h2></div>
         <div className="faq-list">
           <details><summary>Does SaveBolt work with every website?<span>+</span></summary><p>No tool can honestly promise every website. This launch supports major public platforms and direct media links; platform changes can temporarily affect availability.</p></details>
-          <details><summary>Can it download private or paid videos?<span>+</span></summary><p>No. SaveBolt does not accept account cookies and does not bypass DRM, paywalls, regional rights, or private access controls.</p></details>
+          <details><summary>Can it download private or paid videos?<span>+</span></summary><p>No. SaveBolt never accepts visitor cookies and does not bypass DRM, paywalls, regional rights, or private access controls. For strict public platforms, it may use an isolated anonymous server session or an operator-configured session.</p></details>
           <details><summary>Where do completed files go?<span>+</span></summary><p>Your browser saves them through its normal download flow. On iPhone and iPad, they typically appear in the Files app; Android uses the system Downloads folder.</p></details>
           <details><summary>How long are files kept?<span>+</span></summary><p>Completed files remain available for 30 minutes, then the download service removes them automatically.</p></details>
         </div>

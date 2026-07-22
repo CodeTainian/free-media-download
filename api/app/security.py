@@ -5,10 +5,32 @@ import ipaddress
 import re
 import socket
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 
 PLATFORM_DOMAINS: dict[str, tuple[str, ...]] = {
+    # Mainland China
+    "bilibili": ("bilibili.com", "b23.tv"),
+    "douyin": ("douyin.com", "iesdouyin.com"),
+    "xiaohongshu": ("xiaohongshu.com", "xhslink.com"),
+    "weibo": ("weibo.com", "weibo.cn"),
+    "ixigua": ("ixigua.com",),
+    "toutiao": ("toutiao.com",),
+    "acfun": ("acfun.cn",),
+    "youku": ("youku.com", "tudou.com"),
+    "iqiyi": ("iqiyi.com", "iq.com"),
+    "tencent-video": ("v.qq.com", "film.qq.com"),
+    "mango-tv": ("mgtv.com",),
+    "douyu": ("douyu.com",),
+    "huya": ("huya.com",),
+    "cctv": ("cctv.com", "cntv.cn"),
+    "sohu-video": ("tv.sohu.com", "my.tv.sohu.com"),
+    "sina-video": ("video.sina.com.cn",),
+    "ximalaya": ("ximalaya.com",),
+    "netease-music": ("music.163.com",),
+    "qq-music": ("y.qq.com",),
+    "zhihu": ("zhihu.com",),
+    # Global platforms and public broadcasters
     "youtube": ("youtube.com", "youtu.be", "youtube-nocookie.com"),
     "tiktok": ("tiktok.com",),
     "instagram": ("instagram.com",),
@@ -16,8 +38,60 @@ PLATFORM_DOMAINS: dict[str, tuple[str, ...]] = {
     "facebook": ("facebook.com", "fb.watch"),
     "reddit": ("reddit.com", "redd.it"),
     "vimeo": ("vimeo.com",),
-    "bilibili": ("bilibili.com", "b23.tv"),
+    "dailymotion": ("dailymotion.com", "dai.ly"),
+    "twitch": ("twitch.tv",),
+    "soundcloud": ("soundcloud.com",),
+    "bandcamp": ("bandcamp.com",),
+    "mixcloud": ("mixcloud.com",),
+    "pinterest": ("pinterest.com", "pin.it"),
+    "tumblr": ("tumblr.com",),
+    "linkedin": ("linkedin.com",),
+    "snapchat": ("snapchat.com",),
+    "streamable": ("streamable.com",),
+    "rumble": ("rumble.com",),
+    "odysee": ("odysee.com", "lbry.tv"),
+    "vk": ("vk.com",),
+    "rutube": ("rutube.ru",),
+    "ok": ("ok.ru",),
+    "mailru": ("my.mail.ru",),
+    "niconico": ("nicovideo.jp", "niconico.jp"),
+    "naver": ("tv.naver.com", "chzzk.naver.com"),
+    "kakao-tv": ("tv.kakao.com",),
+    "ted": ("ted.com",),
+    "bbc": ("bbc.com", "bbc.co.uk"),
+    "cnn": ("cnn.com",),
+    "nbc": ("nbc.com", "nbcnews.com", "msnbc.com"),
+    "cbs": ("cbs.com",),
+    "fox": ("fox.com", "foxnews.com"),
+    "espn": ("espn.com",),
+    "arte": ("arte.tv",),
+    "crunchyroll": ("crunchyroll.com",),
+    "apple-podcasts": ("podcasts.apple.com",),
+    "archive-org": ("archive.org",),
+    "imgur": ("imgur.com",),
+    "flickr": ("flickr.com",),
+    "kickstarter": ("kickstarter.com",),
+    "bluesky": ("bsky.app",),
+    "dropbox": ("dropbox.com",),
+    "google-drive": ("drive.google.com",),
+    "vidio": ("vidio.com",),
+    "viu": ("viu.com",),
+    "peertube": ("framatube.org", "peertube.debian.social"),
 }
+
+SHORT_LINK_DOMAINS = frozenset(
+    {
+        "b23.tv",
+        "dai.ly",
+        "fb.watch",
+        "pin.it",
+        "redd.it",
+        "v.douyin.com",
+        "vm.tiktok.com",
+        "xhslink.com",
+        "youtu.be",
+    }
+)
 
 DIRECT_EXTENSIONS = {
     ".mp4",
@@ -40,6 +114,18 @@ class UnsafeUrlError(ValueError):
 
 def _domain_matches(host: str, domain: str) -> bool:
     return host == domain or host.endswith(f".{domain}")
+
+
+def _normalize_platform_url(platform: str, normalized: str) -> str:
+    if platform != "douyin":
+        return normalized
+    parsed = urlsplit(normalized)
+    if parsed.path.rstrip("/") not in {"", "/discover", "/jingxuan"}:
+        return normalized
+    modal_ids = parse_qs(parsed.query).get("modal_id", [])
+    if len(modal_ids) == 1 and re.fullmatch(r"[0-9]{10,30}", modal_ids[0]):
+        return f"https://www.douyin.com/video/{modal_ids[0]}"
+    return normalized
 
 
 def parse_public_http_url(raw_url: str) -> tuple[str, str, int]:
@@ -71,15 +157,23 @@ def classify_url(raw_url: str) -> tuple[str, str]:
     normalized, host, _ = parse_public_http_url(raw_url)
     for platform, domains in PLATFORM_DOMAINS.items():
         if any(_domain_matches(host, domain) for domain in domains):
-            return platform, normalized
+            return platform, _normalize_platform_url(platform, normalized)
 
     suffix = Path(urlsplit(normalized).path).suffix.lower()
     if suffix in DIRECT_EXTENSIONS:
         return "direct", normalized
 
     raise UnsafeUrlError(
-        "SaveBolt currently supports YouTube, TikTok, Instagram, X, Facebook, Reddit, Vimeo, Bilibili, and public media file links."
+        "SaveBolt supports recognized public media links from its platform catalog and direct media file links."
     )
+
+
+def is_short_platform_url(raw_url: str) -> bool:
+    try:
+        _, host, _ = parse_public_http_url(raw_url)
+    except UnsafeUrlError:
+        return False
+    return host in SHORT_LINK_DOMAINS
 
 
 def is_public_ip(value: str) -> bool:

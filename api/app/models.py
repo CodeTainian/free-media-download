@@ -118,4 +118,6 @@ class HealthResponse(BaseModel):
     yt_dlp: bool
     ffmpeg: bool
     javascript_runtime: bool
+    anonymous_browser: bool
+    request_impersonation: bool
     yt_dlp_version: str | None = None

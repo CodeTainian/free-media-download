@@ -18,7 +18,17 @@ def test_builds_honest_error_messages():
     assert map_process_error("ERROR: Private video").code == "AUTH_REQUIRED"
     assert map_process_error("This video is DRM protected").code == "DRM_PROTECTED"
     assert map_process_error("HTTP Error 429: Too Many Requests").retryable is True
+    assert map_process_error("Fresh cookies (not necessarily logged in) are needed").code == "COOKIE_REQUIRED"
+    assert map_process_error("Your IP address is blocked from accessing this post").code == "PLATFORM_ACCESS_BLOCKED"
+    assert map_process_error("PhantomJS not found").code == "RUNTIME_UNAVAILABLE"
+    assert map_process_error("No video formats found!").code == "NO_MEDIA"
     assert map_process_error("Unsupported URL").code == "UNSUPPORTED_URL"
+    assert map_process_error("No suitable extractor found for URL").code == "UNSUPPORTED_URL"
+    assert map_process_error("Requested format is not available").code == "FORMAT_UNAVAILABLE"
+    assert (
+        map_process_error('Impersonate target "chrome" is not available. Missing dependencies.').code
+        == "IMPERSONATION_UNAVAILABLE"
+    )
 
 
 def test_direct_probe_requires_original_preset(tmp_path):
@@ -26,10 +36,69 @@ def test_direct_probe_requires_original_preset(tmp_path):
     assert service.config.max_batch_items == 10
 
 
-def test_browser_session_is_only_added_to_youtube_commands(tmp_path):
+def test_browser_session_is_only_added_to_configured_platform_commands(tmp_path):
     service = YtDlpService(Settings(data_dir=tmp_path, cookies_from_browser="chrome"))
-    assert service._youtube_auth_args("youtube") == ["--cookies-from-browser", "chrome"]
-    assert service._youtube_auth_args("bilibili") == []
+    assert service._platform_args("youtube") == ["--cookies-from-browser", "chrome"]
+    assert service._platform_args("bilibili") == []
+
+
+def test_browser_session_can_be_enabled_for_douyin(tmp_path):
+    service = YtDlpService(
+        Settings(
+            data_dir=tmp_path,
+            cookies_from_browser="firefox",
+            cookie_platforms=frozenset({"douyin", "ixigua"}),
+            yt_dlp_user_agent="Mozilla/5.0 test",
+        )
+    )
+    assert service._platform_args("douyin") == [
+        "--user-agent",
+        "Mozilla/5.0 test",
+        "--cookies-from-browser",
+        "firefox",
+    ]
+    assert service._platform_args("youtube") == ["--user-agent", "Mozilla/5.0 test"]
+
+
+def test_cookie_file_and_proxy_are_passed_without_a_shell(tmp_path):
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text("# Netscape HTTP Cookie File\n")
+    service = YtDlpService(
+        Settings(
+            data_dir=tmp_path,
+            cookies_file=cookie_file,
+            cookie_platforms=frozenset({"douyin"}),
+            yt_dlp_proxy="http://127.0.0.1:8080",
+        )
+    )
+    assert service._platform_args("douyin") == [
+        "--proxy",
+        "http://127.0.0.1:8080",
+        "--cookies",
+        str(cookie_file),
+    ]
+
+
+def test_rejects_two_cookie_sources(tmp_path):
+    with pytest.raises(ValueError, match="either"):
+        Settings(
+            data_dir=tmp_path,
+            cookies_from_browser="chrome",
+            cookies_file=tmp_path / "cookies.txt",
+        )
+
+
+def test_missing_cookie_file_returns_configuration_error(tmp_path):
+    service = YtDlpService(
+        Settings(
+            data_dir=tmp_path,
+            cookies_file=tmp_path / "missing.cookies.txt",
+            cookie_platforms=frozenset({"douyin"}),
+        )
+    )
+    with pytest.raises(DownloadError) as caught:
+        service._platform_args("douyin")
+    assert caught.value.code == "COOKIE_SOURCE_ERROR"
 
 
 @pytest.mark.asyncio
@@ -86,6 +155,19 @@ def test_format_mapping_only_exposes_available_resolutions():
         }
     )
     assert [preset.id for preset in presets] == ["best", "mp4-1080", "mp4-720", "mp4-480", "mp4-360", "mp3"]
+
+
+def test_format_mapping_does_not_offer_tiers_below_lowest_source():
+    presets = _build_presets(
+        {
+            "formats": [
+                {"height": 576, "vcodec": "h264"},
+                {"height": 720, "vcodec": "h264"},
+                {"height": 1080, "vcodec": "h264"},
+            ]
+        }
+    )
+    assert [preset.id for preset in presets] == ["best", "mp4-1080", "mp4-720", "mp3"]
 
 
 @pytest.mark.asyncio
