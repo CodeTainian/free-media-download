@@ -2,76 +2,98 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render(path = "/") {
+async function render(path, headers = {}) {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-${path}`);
+  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-${path}-${Math.random()}`);
   const { default: worker } = await import(workerUrl.href);
   return worker.fetch(
-    new Request(`http://localhost${path}`, { headers: { accept: "text/html" } }),
+    new Request(`http://localhost${path}`, {
+      headers: { accept: "text/html", ...headers },
+      redirect: "manual",
+    }),
     { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
     { waitUntil() {}, passThroughOnException() {} },
   );
 }
 
-test("server-renders the SaveBolt product shell", async () => {
-  const response = await render();
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
-  const html = await response.text();
-  assert.match(html, /SaveBolt/);
-  assert.match(html, /Public media, saved cleanly/);
-  assert.match(html, /Keep the videos/);
-  assert.match(html, /Free while we launch/i);
-  assert.match(html, /Coming soon/i);
-  assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
+test("server-renders English and Chinese Bubble Video AI pages", async () => {
+  const [english, chinese] = await Promise.all([
+    render("/en-US"),
+    render("/zh-CN"),
+  ]);
+  assert.equal(english.status, 200);
+  assert.equal(chinese.status, 200);
+  const englishHtml = await english.text();
+  const chineseHtml = await chinese.text();
+  assert.match(englishHtml, /<html lang="en-US"/);
+  assert.match(englishHtml, /Turn any video into knowledge you can use/);
+  assert.match(englishHtml, /Bubble Workspace/);
+  assert.match(englishHtml, /No account required/);
+  assert.match(chineseHtml, /<html lang="zh-CN"/);
+  assert.match(chineseHtml, /把任意视频，变成真正能用的知识/);
+  assert.match(chineseHtml, /无需注册/);
+  assert.doesNotMatch(
+    `${englishHtml}${chineseHtml}`,
+    /codex-preview|Your site is taking shape|react-loading-skeleton/i,
+  );
 });
 
-test("renders legal routes", async () => {
-  const [terms, privacy] = await Promise.all([render("/terms"), render("/privacy")]);
+test("redirects unprefixed routes from Accept-Language", async () => {
+  const [chinese, english, privacy] = await Promise.all([
+    render("/", { "accept-language": "zh-CN,zh;q=0.9,en;q=0.5" }),
+    render("/", { "accept-language": "fr-FR,fr;q=0.9" }),
+    render("/privacy", { "accept-language": "zh;q=1" }),
+  ]);
+  assert.ok([307, 308].includes(chinese.status));
+  assert.match(chinese.headers.get("location") ?? "", /\/zh-CN$/);
+  assert.match(english.headers.get("location") ?? "", /\/en-US$/);
+  assert.match(privacy.headers.get("location") ?? "", /\/zh-CN\/privacy$/);
+});
+
+test("renders localized legal routes", async () => {
+  const [terms, privacy] = await Promise.all([
+    render("/en-US/terms"),
+    render("/zh-CN/privacy"),
+  ]);
   assert.equal(terms.status, 200);
   assert.equal(privacy.status, 200);
   assert.match(await terms.text(), /Terms of use/);
   const privacyHtml = await privacy.text();
-  assert.match(privacyHtml, /Privacy, plainly/);
+  assert.match(privacyHtml, /把隐私说清楚/);
   assert.match(privacyHtml, /DeepSeek API/);
-  assert.match(privacyHtml, /does not send the video file or audio/i);
+  assert.match(privacyHtml, /不会发送视频或音频文件/);
 });
 
-test("keeps the launch implementation honest and accessible", async () => {
-  const [client, layout, packageJson, css, apiProxy, envExample] = await Promise.all([
-    readFile(new URL("../app/components/download-studio.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../package.json", import.meta.url), "utf8"),
-    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
-    readFile(new URL("../app/api/v1/[...path]/route.ts", import.meta.url), "utf8"),
-    readFile(new URL("../.env.example", import.meta.url), "utf8"),
-  ]);
-  assert.match(client, /aria-label="Public video URL"/);
-  assert.match(client, /role="alert"/);
-  assert.match(client, /Pro is not accepting payments yet/);
-  assert.match(client, /EventSource/);
-  assert.match(client, /Batch · up to 10/);
-  assert.match(client, /\/api\/v1\/summaries/);
-  assert.match(client, /summary_supported/);
-  assert.match(client, /No usable captions/);
-  assert.match(client, /role="progressbar"/);
-  assert.match(client, /aria-busy=/);
-  assert.match(client, /Cancel summary/);
-  assert.match(client, /SUMMARY_CANCEL_FAILED/);
-  assert.match(client, /Copy summary/);
-  assert.match(client, /Source evidence/);
-  assert.match(client, /language=\{summaryJob\.result/);
-  assert.match(client, /No audio or full video is sent/);
-  assert.match(client, /aria-describedby=\{summaryNoteId\}/);
-  assert.match(client, /NEXT_PUBLIC_API_BASE_URL \?\? ""/);
+test("keeps the implementation honest, accessible, and split by responsibility", async () => {
+  const [input, workspace, stream, layout, packageJson, css, apiProxy, envExample] =
+    await Promise.all([
+      readFile(new URL("../app/components/media-input/bubble-input.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../app/components/workspace/result-workspace.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../app/hooks/use-task-stream.ts", import.meta.url), "utf8"),
+      readFile(new URL("../app/[locale]/layout.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../package.json", import.meta.url), "utf8"),
+      readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+      readFile(new URL("../app/api/v1/[...path]/route.ts", import.meta.url), "utf8"),
+      readFile(new URL("../.env.example", import.meta.url), "utf8"),
+    ]);
+  assert.match(input, /aria-label=\{dictionary\.input\.urlLabel\}/);
+  assert.match(input, /NEXT_PUBLIC_ENABLE_UPLOAD/);
+  assert.match(workspace, /role="tabpanel"/);
+  assert.match(workspace, /aria-live="polite"/);
+  assert.doesNotMatch(workspace, /dangerouslySetInnerHTML/);
+  assert.match(stream, /reconnectDelays = \[1000, 2000, 4000, 8000, 10000\]/);
+  assert.match(stream, /getSnapshot/);
   assert.match(apiProxy, /SAVEBOLT_API_ORIGIN/);
-  assert.match(apiProxy, /SAFE_PATH_SEGMENT/);
   assert.match(apiProxy, /last-event-id/);
-  assert.match(apiProxy, /return new Response\(upstream\.body/);
-  assert.match(envExample, /SAVEBOLT_API_ORIGIN=http:\/\/127\.0\.0\.1:8000/);
-  assert.match(layout, /SaveBolt — Public media, saved cleanly/);
-  assert.doesNotMatch(layout, /codex-preview|Starter Project/);
+  assert.match(envExample, /NEXT_PUBLIC_SHOW_PRICING_PREVIEW=true/);
+  assert.match(envExample, /NEXT_PUBLIC_ENABLE_UPLOAD=false/);
+  assert.match(layout, /<html lang=\{documentLocale\}>/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
+  assert.match(css, /--background: #f7f7f4/);
   assert.match(css, /prefers-reduced-motion/);
-  await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
+  assert.match(css, /@media \(max-width: 520px\)/);
+  assert.match(css, /overflow-x: clip/);
+  await assert.rejects(
+    access(new URL("../app/components/download-studio.tsx", import.meta.url)),
+  );
 });

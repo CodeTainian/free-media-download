@@ -36,7 +36,7 @@ async function proxy(request: NextRequest, context: ProxyContext) {
     return Response.json(
       {
         code: "SERVICE_OFFLINE",
-        message: "The SaveBolt API origin is not configured for this deployment.",
+        message: "The Bubble Video AI service is not configured for this deployment.",
         retryable: true,
       },
       { status: 503 },
@@ -73,7 +73,7 @@ async function proxy(request: NextRequest, context: ProxyContext) {
     return Response.json(
       {
         code: "SERVICE_OFFLINE",
-        message: "SaveBolt could not reach the media service.",
+        message: "Bubble Video AI could not reach the media service.",
         retryable: true,
       },
       { status: 502 },
