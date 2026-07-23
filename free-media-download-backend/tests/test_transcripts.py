@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.downloader import DownloadError, YtDlpService, _normalize_info
@@ -11,6 +12,8 @@ from app.transcripts import (
     parse_subtitle_file,
     parse_subtitle_text,
     select_caption_track,
+    TranscriptDocument,
+    TranscriptSegment,
 )
 
 
@@ -163,6 +166,63 @@ def test_probe_metadata_marks_supported_video_without_captions_unavailable():
 
     assert media.summary_supported is False
     assert media.transcript_strategy_hint == "unavailable"
+
+
+def test_probe_metadata_exposes_audio_transcription_only_when_provider_is_ready():
+    info = {
+        "title": "Spoken lesson",
+        "formats": [{"acodec": "aac", "vcodec": "none"}],
+    }
+    configured = _normalize_info(
+        info,
+        "https://www.youtube.com/watch?v=public",
+        platform_key="youtube",
+        transcription_ready=True,
+    )
+    unconfigured = _normalize_info(
+        info,
+        "https://www.youtube.com/watch?v=public",
+        platform_key="youtube",
+        transcription_ready=False,
+    )
+
+    assert configured.transcript_strategy_hint == "audio_transcription"
+    assert configured.summary_supported is True
+    assert unconfigured.transcript_strategy_hint == "audio_transcription"
+    assert unconfigured.summary_supported is False
+
+
+def test_transcript_models_are_strict_json_serializable_and_keep_evidence_ids():
+    document = TranscriptDocument(
+        source_url="https://www.youtube.com/watch?v=public",
+        title="Lesson",
+        platform="youtube",
+        duration=30,
+        language="en",
+        source_kind="audio_transcription",
+        provider="mock",
+        segments=(
+            TranscriptSegment(
+                id="seg-00001",
+                start=0,
+                end=1.5,
+                text="Evidence",
+                confidence=0.9,
+            ),
+        ),
+    )
+
+    restored = TranscriptDocument.model_validate_json(document.model_dump_json())
+    assert restored == document
+    assert restored.segments[0].id == "seg-00001"
+    with pytest.raises(ValidationError):
+        TranscriptSegment(
+            id="seg-00002",
+            start=1,
+            end=2,
+            text="Unexpected",
+            unknown="rejected",
+        )
 
 
 def test_caption_command_uses_fixed_output_and_selected_track(tmp_path):

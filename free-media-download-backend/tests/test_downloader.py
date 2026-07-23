@@ -1,9 +1,16 @@
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from app.downloader import DownloadError, YtDlpService, _build_presets, map_process_error
+from app.downloader import (
+    DownloadError,
+    TranscriptSource,
+    YtDlpService,
+    _build_presets,
+    map_process_error,
+)
 from app.config import Settings, _yt_dlp_binary
 from app.models import ProbeResponse
 
@@ -188,6 +195,131 @@ def test_format_mapping_does_not_offer_tiers_below_lowest_source():
         }
     )
     assert [preset.id for preset in presets] == ["best", "mp4-1080", "mp4-720", "mp3"]
+
+
+@pytest.mark.asyncio
+async def test_transcription_audio_extraction_uses_fixed_safe_command(
+    tmp_path, monkeypatch
+):
+    service = YtDlpService(
+        Settings(data_dir=tmp_path, yt_dlp_binary="yt-dlp-test")
+    )
+    output_dir = tmp_path / "summaries" / "job" / "audio" / "source"
+    captured: list[str] = []
+
+    class Stream:
+        def __init__(self, lines):
+            self.lines = list(lines)
+
+        async def readline(self):
+            return self.lines.pop(0) if self.lines else b""
+
+    class Process:
+        def __init__(self):
+            self.returncode = None
+            self.stdout = Stream([b"SBPROGRESS|50.0%\n", b""])
+            self.stderr = Stream([])
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    async def fake_create(*command, **kwargs):
+        captured.extend(command)
+        assert kwargs["start_new_session"] is True
+        template = Path(command[command.index("-o") + 1])
+        template.with_name(template.name.replace("%(ext)s", "m4a")).write_bytes(
+            b"audio"
+        )
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    source = TranscriptSource(
+        platform="youtube",
+        normalized_url="https://www.youtube.com/watch?v=public",
+        source_url="https://www.youtube.com/watch?v=public",
+        title="Public lesson",
+        duration=60,
+        info={"formats": [{"acodec": "aac"}]},
+    )
+    progress: list[float] = []
+    result = await service.extract_transcription_audio(
+        source,
+        output_dir,
+        asyncio.Event(),
+        lambda value: _capture_progress(progress, value),
+    )
+
+    assert result.is_file()
+    assert progress == [0.5, 1]
+    assert "--ignore-config" in captured
+    assert "--no-playlist" in captured
+    assert captured[captured.index("--use-extractors") + 1] == "default,-generic"
+    assert captured[captured.index("-f") + 1] == "ba/b"
+    assert "--cookies-from-browser" not in captured
+
+
+async def _capture_progress(values, value):
+    values.append(value)
+
+
+@pytest.mark.asyncio
+async def test_transcription_audio_extraction_cancels_yt_dlp(
+    tmp_path, monkeypatch
+):
+    service = YtDlpService(
+        Settings(data_dir=tmp_path, yt_dlp_binary="yt-dlp-test")
+    )
+    cancel_event = asyncio.Event()
+    terminated = asyncio.Event()
+
+    class BlockingStream:
+        async def readline(self):
+            await asyncio.sleep(60)
+
+    class EmptyStream:
+        async def readline(self):
+            return b""
+
+    class Process:
+        returncode = None
+        stdout = BlockingStream()
+        stderr = EmptyStream()
+
+        async def wait(self):
+            return self.returncode
+
+    async def fake_create(*_command, **_kwargs):
+        return Process()
+
+    async def fake_terminate(process):
+        process.returncode = -15
+        terminated.set()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    monkeypatch.setattr("app.downloader.terminate_process", fake_terminate)
+    source = TranscriptSource(
+        platform="youtube",
+        normalized_url="https://www.youtube.com/watch?v=public",
+        source_url="https://www.youtube.com/watch?v=public",
+        title="Public lesson",
+        duration=60,
+        info={"formats": [{"acodec": "aac"}]},
+    )
+    task = asyncio.create_task(
+        service.extract_transcription_audio(
+            source,
+            tmp_path / "summaries" / "job" / "audio" / "source",
+            cancel_event,
+            lambda _value: asyncio.sleep(0),
+        )
+    )
+    await asyncio.sleep(0)
+    cancel_event.set()
+    with pytest.raises(DownloadError) as caught:
+        await task
+    assert caught.value.code == "CANCELLED"
+    assert terminated.is_set()
 
 
 @pytest.mark.asyncio

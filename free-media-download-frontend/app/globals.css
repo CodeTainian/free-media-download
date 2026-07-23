@@ -1023,6 +1023,17 @@ img {
   color: var(--text-tertiary);
 }
 
+.asr-consent-note {
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 8px;
+  line-height: 1.45;
+  margin: 0;
+  padding: 8px;
+}
+
 .download-panel {
   background: var(--surface-muted);
   border: 1px solid var(--border);

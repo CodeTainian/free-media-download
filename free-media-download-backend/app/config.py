@@ -7,6 +7,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def _int(name: str, default: int) -> int:
@@ -21,6 +22,13 @@ def _bool(name: str, default: bool) -> bool:
     if configured is None:
         return default
     return configured.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 SUPPORTED_COOKIE_BROWSERS = frozenset(
@@ -70,6 +78,13 @@ def _ffmpeg_binary() -> str:
         return "ffmpeg"
 
 
+def _ffprobe_binary() -> str:
+    configured = os.getenv("SAVEBOLT_FFPROBE_BINARY")
+    if configured:
+        return configured
+    return shutil.which("ffprobe") or "ffprobe"
+
+
 def _yt_dlp_binary() -> str:
     configured = os.getenv("SAVEBOLT_YTDLP_BINARY", "").strip()
     if configured:
@@ -108,8 +123,28 @@ class Settings:
     )
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
+    transcription_provider: str = os.getenv("TRANSCRIPTION_PROVIDER", "none").strip().lower()
+    transcription_api_key: str | None = field(
+        default=_optional_text("TRANSCRIPTION_API_KEY"), repr=False
+    )
+    transcription_model: str = os.getenv("TRANSCRIPTION_MODEL", "whisper-1").strip()
+    transcription_base_url: str = os.getenv(
+        "TRANSCRIPTION_BASE_URL", "https://api.openai.com/v1"
+    ).rstrip("/")
+    transcription_timeout_seconds: float = _float("TRANSCRIPTION_TIMEOUT_SECONDS", 900)
+    transcription_max_duration_seconds: int = _int(
+        "TRANSCRIPTION_MAX_DURATION_SECONDS", 2 * 60 * 60
+    )
+    transcription_max_file_bytes: int = _int(
+        "TRANSCRIPTION_MAX_FILE_BYTES", 24 * 1024**2
+    )
+    transcription_chunk_seconds: int = _int("TRANSCRIPTION_CHUNK_SECONDS", 600)
+    transcription_chunk_overlap_seconds: float = _float(
+        "TRANSCRIPTION_CHUNK_OVERLAP_SECONDS", 2
+    )
     yt_dlp_binary: str = _yt_dlp_binary()
     ffmpeg_binary: str = _ffmpeg_binary()
+    ffprobe_binary: str = _ffprobe_binary()
     yt_dlp_js_runtime: str = os.getenv("SAVEBOLT_YTDLP_JS_RUNTIME", "node")
     cookies_from_browser: str | None = _cookies_from_browser()
     cookies_file: Path | None = _optional_path("SAVEBOLT_COOKIES_FILE")
@@ -139,6 +174,39 @@ class Settings:
             raise ValueError(
                 "Configure either SAVEBOLT_COOKIES_FROM_BROWSER or SAVEBOLT_COOKIES_FILE, not both"
             )
+        if self.transcription_provider not in {"none", "openai_compatible"}:
+            raise ValueError(
+                "TRANSCRIPTION_PROVIDER must be 'none' or 'openai_compatible'"
+            )
+        parsed_base_url = urlsplit(self.transcription_base_url)
+        if (
+            parsed_base_url.scheme not in {"http", "https"}
+            or not parsed_base_url.hostname
+            or parsed_base_url.username
+            or parsed_base_url.password
+        ):
+            raise ValueError(
+                "TRANSCRIPTION_BASE_URL must be an HTTP(S) URL without credentials"
+            )
+        if (
+            self.transcription_timeout_seconds <= 0
+            or self.transcription_max_duration_seconds <= 0
+            or self.transcription_max_file_bytes <= 0
+            or self.transcription_chunk_seconds <= 0
+            or self.transcription_chunk_overlap_seconds < 0
+            or self.transcription_chunk_overlap_seconds
+            >= self.transcription_chunk_seconds
+        ):
+            raise ValueError("Transcription limits must be positive and overlap must be smaller than a chunk")
+
+    @property
+    def transcription_configured(self) -> bool:
+        return bool(
+            self.transcription_provider == "openai_compatible"
+            and self.transcription_api_key
+            and self.transcription_model
+            and self.transcription_base_url
+        )
 
 
 settings = Settings()

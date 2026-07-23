@@ -50,6 +50,8 @@ export function MediaResults({
       <div className="media-result-list">
         {items.map((item, index) => {
           const unavailable = summaryUnavailableReason(item, dictionary);
+          const usesAudioTranscription =
+            item.transcript_strategy_hint === "audio_transcription";
           return (
             <article className="media-result-card" key={item.selectionId}>
               <div className="media-result-index">
@@ -81,8 +83,15 @@ export function MediaResults({
                   disabled={Boolean(unavailable) || summaryStarting}
                   loading={summaryStarting}
                 >
-                  {dictionary.media.analyzeKnowledge}
+                  {usesAudioTranscription
+                    ? dictionary.media.transcribeAndSummarize
+                    : dictionary.media.analyzeKnowledge}
                 </ActionButton>
+                {usesAudioTranscription ? (
+                  <p className="asr-consent-note">
+                    {dictionary.media.asrConsent}
+                  </p>
+                ) : null}
                 <label>
                   <span className="sr-only">
                     {dictionary.media.downloadTitle}: {item.title}
@@ -101,8 +110,10 @@ export function MediaResults({
                   </select>
                 </label>
                 <small className={unavailable ? "unavailable" : ""}>
-                  {unavailable ??
-                    `${item.caption_languages.length || 1} ${dictionary.media.captions} · ${dictionary.media.englishOutput}`}
+                  {usesAudioTranscription
+                    ? `${dictionary.media.audioTranscriptionAvailable}${unavailable ? ` · ${unavailable}` : ""}`
+                    : unavailable ??
+                      `${item.caption_languages.length} ${dictionary.media.captions} · ${dictionary.media.englishOutput}`}
                 </small>
               </div>
             </article>

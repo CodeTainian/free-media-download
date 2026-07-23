@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
 
 SUMMARY_PLATFORMS = frozenset({"youtube", "bilibili"})
 _CAPTION_BUCKETS = (("subtitles", False), ("automatic_captions", True))
@@ -31,23 +33,67 @@ class CaptionTrack:
         return "automatic_caption" if self.automatic else "manual_caption"
 
 
-@dataclass(frozen=True, slots=True)
-class TranscriptSegment:
+class TranscriptSegment(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     id: str
     start: float
     end: float
     text: str
+    speaker: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+    @field_validator("id", "text")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("value must not be empty")
+        return stripped
+
+    @field_validator("speaker")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> "TranscriptSegment":
+        if self.start < 0 or self.end <= self.start:
+            raise ValueError("segment timing must be positive and increasing")
+        return self
 
 
-@dataclass(frozen=True, slots=True)
-class TranscriptDocument:
+class TranscriptDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     source_url: str
     title: str
     platform: str
     duration: int | None
     language: str
-    source_kind: Literal["manual_caption", "automatic_caption"]
+    source_kind: Literal[
+        "manual_caption", "automatic_caption", "audio_transcription"
+    ]
     segments: tuple[TranscriptSegment, ...]
+    detected_language: str | None = None
+    requested_language: str | None = None
+    provider: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    transcription_duration: float | None = Field(default=None, ge=0)
+    audio_duration: float | None = Field(default=None, ge=0)
+
+    @field_validator("source_url", "title", "platform", "language")
+    @classmethod
+    def strip_document_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("value must not be empty")
+        return stripped
+
+    @field_validator("detected_language", "requested_language", "provider")
+    @classmethod
+    def strip_optional_document_text(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
 
 
 def _valid_language(value: object) -> str | None:
@@ -219,7 +265,9 @@ def _clean_cue(lines: list[str]) -> str:
     return re.sub(r"\s+", " ", value.replace("\u200b", " ")).strip()
 
 
-def _normalize_segments(raw_segments: list[tuple[float, float, str]]) -> tuple[TranscriptSegment, ...]:
+def normalize_transcript_segments(
+    raw_segments: list[tuple[float, float, str]],
+) -> tuple[TranscriptSegment, ...]:
     normalized: list[tuple[float, float, str]] = []
     for raw_start, raw_end, raw_text in sorted(raw_segments, key=lambda item: (item[0], item[1])):
         start = round(raw_start, 3)
@@ -275,7 +323,7 @@ def parse_subtitle_text(value: str) -> tuple[TranscriptSegment, ...]:
         text = _clean_cue(cue_lines)
         if start is not None and end is not None and text:
             raw_segments.append((start, end, text))
-    return _normalize_segments(raw_segments)
+    return normalize_transcript_segments(raw_segments)
 
 
 def parse_subtitle_file(path: Path) -> tuple[TranscriptSegment, ...]:

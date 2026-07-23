@@ -30,9 +30,14 @@ class ItemStatus(StrEnum):
 
 class SummaryStage(StrEnum):
     QUEUED = "queued"
+    PROBING = "probing"
     FETCHING_CAPTIONS = "fetching_captions"
-    PARSING = "parsing"
+    EXTRACTING_AUDIO = "extracting_audio"
+    PREPARING_AUDIO = "preparing_audio"
+    TRANSCRIBING = "transcribing"
+    PARSING_TRANSCRIPT = "parsing_transcript"
     SUMMARIZING = "summarizing"
+    GENERATING_CHAPTERS = "generating_chapters"
     FINALIZING = "finalizing"
     COMPLETED = "completed"
 
@@ -63,7 +68,9 @@ class MediaItem(BaseModel):
     is_playlist_item: bool = False
     summary_supported: bool = False
     caption_languages: list[str] = Field(default_factory=list)
-    transcript_strategy_hint: Literal["captions", "unavailable", "unsupported"] = "unsupported"
+    transcript_strategy_hint: Literal[
+        "captions", "audio_transcription", "unavailable", "unsupported"
+    ] = "unsupported"
     presets: list[Preset]
 
 
@@ -166,7 +173,9 @@ class SummaryResult(BaseModel):
     platform: str
     duration: int | None = None
     caption_language: str
-    caption_source: Literal["manual_caption", "automatic_caption"]
+    caption_source: Literal[
+        "manual_caption", "automatic_caption", "audio_transcription"
+    ]
     output_language: Literal["en"] = "en"
     overview: str
     outline: list[SummaryOutlineItem]
@@ -197,4 +206,6 @@ class HealthResponse(BaseModel):
     javascript_runtime: bool
     anonymous_browser: bool
     request_impersonation: bool
+    transcription: bool
+    transcription_provider: str | None = None
     yt_dlp_version: str | None = None

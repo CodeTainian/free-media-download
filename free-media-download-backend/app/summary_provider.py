@@ -61,7 +61,7 @@ class TranscriptChunk:
 
 
 ProgressCallback = Callable[[float], Awaitable[None]]
-FinalizingCallback = Callable[[], Awaitable[None]]
+StageCallback = Callable[[], Awaitable[None]]
 
 
 class SummaryProvider(Protocol):
@@ -400,14 +400,15 @@ class SummaryService:
         title: str | None,
         output_language: str,
         on_progress: ProgressCallback,
-        on_finalizing: FinalizingCallback,
+        on_generating_chapters: StageCallback,
+        on_finalizing: StageCallback,
     ) -> SummaryResult:
         chunks = chunk_transcript(transcript, self.config.summary_chunk_characters)
         drafts: list[SummaryDraft] = []
         for index, chunk in enumerate(chunks, 1):
             drafts.append(await self.provider.summarize_chunk(chunk, output_language))
-            await on_progress(30 + (50 * index / len(chunks)))
-        await on_finalizing()
+            await on_progress(index / len(chunks))
+        await on_generating_chapters()
         final_draft = await self.provider.synthesize(drafts, output_language)
-        await on_progress(95)
+        await on_finalizing()
         return resolve_summary_draft(transcript, final_draft, title=title)

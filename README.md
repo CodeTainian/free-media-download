@@ -1,6 +1,6 @@
 # SaveBolt
 
-SaveBolt is a local-first MVP for saving public media that the user owns or is authorized to download. It supports single links, batches of up to ten items, mobile-compatible MP4, source-quality video, MP3 audio, per-file downloads, and ZIP bundles. Captioned YouTube and Bilibili videos up to two hours can also be turned into an English AI overview, timeline, key points, and linked original-language evidence. Its URL catalog covers 60+ platform families across mainland China and the rest of the world.
+SaveBolt is a local-first MVP for saving and understanding public media that the user owns or is authorized to process. It supports single links, batches of up to ten items, mobile-compatible MP4, source-quality video, MP3 audio, per-file downloads, and ZIP bundles. Public YouTube and Bilibili videos up to two hours can also be turned into an English AI overview, timeline, key points, and linked original-language evidence. The analysis pipeline prefers captions and can fall back to configured audio transcription when captions are unavailable. Its URL catalog covers 60+ platform families across mainland China and the rest of the world.
 
 It does **not** accept cookies from API clients or bypass DRM, paywalls, private media, or access controls. For public Douyin links, the API can create an isolated anonymous Chromium session automatically; an operator may also opt in to yt-dlp's official browser-cookie or cookie-file integration for selected platforms. Neither path passes cookie data through the public API.
 
@@ -16,12 +16,12 @@ The completed video-download MVP, its engineering decisions, validation evidence
 ## Architecture
 
 - `free-media-download-frontend/` — anonymous React/TypeScript product site built with vinext; local development proxies `/api/v1` to the API on the server side
-- `free-media-download-backend/` — FastAPI service that wraps pinned upstream `yt-dlp` and FFmpeg binaries without shell execution, plus an isolated DeepSeek summary provider
+- `free-media-download-backend/` — FastAPI service that wraps pinned upstream `yt-dlp`, FFmpeg, a configurable speech-to-text provider, and an isolated DeepSeek summary provider without shell execution
 - `docker-compose.yml` — local web, API, health checks, and temporary job volume
 
 The API accepts only server-defined presets. Platform URLs are passed to pinned `yt-dlp==2026.7.4` without a shell and with the generic extractor disabled. The API image also carries the pinned Node 24 runtime required by current yt-dlp YouTube extraction and Chromium for isolated anonymous Douyin sessions. Public direct-media links use a separate downloader that validates and pins public DNS results for every redirect, blocking loopback, private, link-local, reserved, and cloud-metadata destinations.
 
-Download and summary job state is held in memory. Completed files, temporary captions, and summary results remain available for 30 minutes by default and are then removed. Restarting the API clears active job state.
+Download and summary job state is held in memory. Temporary audio is deleted as soon as an analysis task ends. Completed files, captions, transcripts, and summary results remain available for 30 minutes by default and are then removed. Restarting the API clears active job state.
 
 ## Run with Docker
 
@@ -87,9 +87,11 @@ preview-container, IPv4/IPv6, and CORS differences around `localhost`. Set
 
 ### AI summaries
 
-Set a fresh `DEEPSEEK_API_KEY` in the backend environment to enable AI Summary. The default model is `deepseek-v4-flash` and can be changed with `DEEPSEEK_MODEL`. SaveBolt uses server-selected VTT/SRT captions only: it does not download audio for transcription, does not expose a complete transcript endpoint, and never accepts a caption URL from the client. The default limit is five created summary tasks per source IP in a rolling 24-hour window.
+Set a fresh `DEEPSEEK_API_KEY` in the backend environment to enable AI Summary. The default model is `deepseek-v4-flash` and can be changed with `DEEPSEEK_MODEL`. Bubble Video AI always prefers server-selected manual VTT/SRT captions, then automatic captions. When none are available, public YouTube and Bilibili audio can be normalized and transcribed if `TRANSCRIPTION_PROVIDER=openai_compatible` and `TRANSCRIPTION_API_KEY` are configured. The default transcription model is `whisper-1`; provider base URL, timeouts, duration, upload-size, and chunk limits are operator-controlled through the variables in the backend environment example. No provider key, media path, caption URL, Cookie, or yt-dlp argument is accepted from the client.
 
-The web UI shows AI Summary only after media analysis. It explains why the action is unavailable when a platform is unsupported, captions are missing, or the video exceeds two hours. While a task runs, the UI follows caption fetching, parsing, summarizing, and evidence finalization over SSE; completed citations link back to the source timestamp.
+The no-caption path converts extracted audio to mono 16 kHz PCM WAV chunks, preserves chunk offsets when rebuilding global timestamps, and deletes its isolated audio directory on success, failure, cancellation, or timeout. The default limit is five created summary tasks per source IP in a rolling 24-hour window. The legacy `/api/v1/summaries` response remains compatible; `caption_source` can now also be `audio_transcription`.
+
+The web UI shows AI Summary only after media analysis. It explains why the action is unavailable when a platform or public audio track is unsupported, transcription is not configured, or the video exceeds two hours. While a task runs, the UI follows source probing, caption selection, optional audio extraction/preparation/transcription, transcript parsing, summarizing, chapter generation, and evidence finalization over SSE; completed citations link back to the source timestamp.
 
 ## Validation
 
@@ -99,7 +101,7 @@ PYTHONPATH=free-media-download-backend free-media-download-backend/.venv/bin/pyt
 docker compose config
 ```
 
-The automated suites cover URL allowlisting and SSRF protection, similar-domain attacks, format mapping, file-size limits, cancellation, timeouts, SSE ordering, partial failure, ZIP creation, TTL cleanup, rate limiting, caption parsing and selection, summary chunking and evidence validation, summary lifecycle handling, legal pages, launch claims, and SSR output.
+The automated suites cover URL allowlisting and SSRF protection, similar-domain attacks, format mapping, file-size limits, cancellation, timeouts, SSE ordering, partial failure, ZIP creation, TTL cleanup, rate limiting, caption parsing and selection, audio normalization and chunk offsets, transcription provider error mapping and secret hygiene, summary chunking and evidence validation, summary lifecycle handling, legal pages, launch claims, and SSR output.
 
 ## Runtime limits
 

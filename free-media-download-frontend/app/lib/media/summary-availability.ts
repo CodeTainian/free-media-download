@@ -11,6 +11,9 @@ export function summaryUnavailableReason(
     return dictionary.media.tooLong;
   }
   if (item.summary_supported) return null;
+  if (item.transcript_strategy_hint === "audio_transcription") {
+    return dictionary.media.transcriptionUnavailable;
+  }
   if (item.transcript_strategy_hint === "unavailable") {
     return dictionary.media.noCaptions;
   }

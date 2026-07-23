@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from .audio_processor import AudioProcessingError
 from .config import Settings
-from .downloader import DownloadError, YtDlpService
+from .downloader import DownloadError
 from .models import (
     CreateSummaryRequest,
     ErrorBody,
@@ -19,6 +20,8 @@ from .models import (
     SummaryStage,
 )
 from .summary_provider import SummaryError, SummaryService
+from .transcript_acquisition import TranscriptAcquisitionService
+from .transcription_provider import TranscriptionError
 
 
 def now_utc() -> datetime:
@@ -47,11 +50,11 @@ class SummaryJobManager:
     def __init__(
         self,
         config: Settings,
-        downloader: YtDlpService,
+        transcript_acquisition: TranscriptAcquisitionService,
         summarizer: SummaryService,
     ):
         self.config = config
-        self.downloader = downloader
+        self.transcript_acquisition = transcript_acquisition
         self.summarizer = summarizer
         self.jobs: dict[str, SummaryJobState] = {}
         self.semaphore = asyncio.Semaphore(config.summary_worker_concurrency)
@@ -79,6 +82,7 @@ class SummaryJobManager:
             self.cleanup_task = None
         for job in list(self.jobs.values()):
             await self.cancel(job.id, remove_files=False)
+        await self.transcript_acquisition.close()
         await self.summarizer.close()
 
     async def create(self, request: CreateSummaryRequest) -> SummaryJobState:
@@ -118,35 +122,69 @@ class SummaryJobManager:
                     return
                 job.status = JobStatus.RUNNING
                 await self._publish(job, "started")
-                await self._advance(job, SummaryStage.FETCHING_CAPTIONS, 5)
+
+                stage_progress = {
+                    "probing": (SummaryStage.PROBING, 2),
+                    "fetching_captions": (SummaryStage.FETCHING_CAPTIONS, 5),
+                    "extracting_audio": (SummaryStage.EXTRACTING_AUDIO, 10),
+                    "preparing_audio": (SummaryStage.PREPARING_AUDIO, 30),
+                    "transcribing": (SummaryStage.TRANSCRIBING, 40),
+                }
 
                 async def on_transcript_stage(stage: str) -> None:
-                    if stage == "parsing":
-                        await self._advance(job, SummaryStage.PARSING, 20)
+                    if stage == "parsing_transcript":
+                        progress = (
+                            72
+                            if job.stage == SummaryStage.TRANSCRIBING
+                            or job.progress >= 40
+                            else 20
+                        )
+                        await self._advance(
+                            job, SummaryStage.PARSING_TRANSCRIPT, progress
+                        )
+                        return
+                    summary_stage, progress = stage_progress[stage]
+                    await self._advance(job, summary_stage, progress)
 
-                transcript = await self.downloader.fetch_caption_transcript(
+                async def on_transcript_progress(stage: str, value: float) -> None:
+                    value = max(0, min(1, value))
+                    if stage == "extracting_audio":
+                        progress = 10 + 15 * value
+                    elif stage == "preparing_audio":
+                        progress = 30 + 8 * value
+                    elif stage == "transcribing":
+                        progress = 40 + 30 * value
+                    else:
+                        return
+                    await self._set_progress(job, progress)
+
+                transcript = await self.transcript_acquisition.acquire(
                     job.request.url,
-                    job.directory / "captions",
+                    job.directory,
                     preferred_languages=(job.request.output_language,),
                     cancel_event=job.cancel_event,
                     on_stage=on_transcript_stage,
+                    on_progress=on_transcript_progress,
                 )
                 if job.cancel_event.is_set():
                     raise DownloadError("CANCELLED", "The summary job was cancelled.")
                 await self._advance(job, SummaryStage.SUMMARIZING, 30)
 
                 async def on_progress(progress: float) -> None:
-                    job.progress = max(job.progress, min(99, progress))
-                    await self._publish(job, "progress")
+                    await self._set_progress(job, 30 + 60 * max(0, min(1, progress)))
+
+                async def on_generating_chapters() -> None:
+                    await self._advance(job, SummaryStage.GENERATING_CHAPTERS, 92)
 
                 async def on_finalizing() -> None:
-                    await self._advance(job, SummaryStage.FINALIZING, 85)
+                    await self._advance(job, SummaryStage.FINALIZING, 97)
 
                 job.result = await self.summarizer.generate(
                     transcript,
                     title=job.request.title,
                     output_language=job.request.output_language,
                     on_progress=on_progress,
+                    on_generating_chapters=on_generating_chapters,
                     on_finalizing=on_finalizing,
                 )
                 if job.cancel_event.is_set():
@@ -173,12 +211,21 @@ class SummaryJobManager:
         except SummaryError as exc:
             if job.status != JobStatus.CANCELLED:
                 await self._fail(job, exc.code, exc.message, exc.retryable)
+        except (AudioProcessingError, TranscriptionError) as exc:
+            if job.status == JobStatus.CANCELLED:
+                return
+            if exc.code == "CANCELLED":
+                job.status = JobStatus.CANCELLED
+                job.completed_at = now_utc()
+                await self._publish(job, "cancelled")
+                return
+            await self._fail(job, exc.code, exc.message, exc.retryable)
         except Exception:
             if job.status != JobStatus.CANCELLED:
                 await self._fail(
                     job,
                     "SUMMARY_FAILED",
-                    "SaveBolt could not finish this summary.",
+                    "Bubble Video AI could not finish this summary.",
                     True,
                 )
 
@@ -188,6 +235,11 @@ class SummaryJobManager:
         job.stage = stage
         job.progress = max(job.progress, progress)
         await self._publish(job, "stage_changed")
+        await self._publish(job, "progress")
+
+    async def _set_progress(self, job: SummaryJobState, progress: float) -> None:
+        job.progress = max(job.progress, min(99, progress))
+        await self._publish(job, "progress")
 
     async def _fail(
         self,

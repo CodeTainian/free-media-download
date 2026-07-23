@@ -3,12 +3,21 @@ export type SourceMode = "url" | "upload";
 export type OutputKind = "video" | "audio" | "original";
 export type ItemStatus = "queued" | "running" | "ready" | "failed" | "cancelled";
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
-export type TranscriptStrategy = "captions" | "unavailable" | "unsupported";
+export type TranscriptStrategy =
+  | "captions"
+  | "audio_transcription"
+  | "unavailable"
+  | "unsupported";
 export type SummaryStage =
   | "queued"
+  | "probing"
   | "fetching_captions"
-  | "parsing"
+  | "extracting_audio"
+  | "preparing_audio"
+  | "transcribing"
+  | "parsing_transcript"
   | "summarizing"
+  | "generating_chapters"
   | "finalizing"
   | "completed";
 
@@ -105,7 +114,10 @@ export type SummaryResult = {
   platform: string;
   duration?: number | null;
   caption_language: string;
-  caption_source: "manual_caption" | "automatic_caption";
+  caption_source:
+    | "manual_caption"
+    | "automatic_caption"
+    | "audio_transcription";
   output_language: "en";
   overview: string;
   outline: SummaryOutlineItem[];

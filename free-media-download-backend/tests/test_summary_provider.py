@@ -251,6 +251,7 @@ async def test_summary_service_reports_progress_and_resolves_final_result(tmp_pa
     )
     progress: list[float] = []
     finalizing = 0
+    generating_chapters = 0
 
     async def on_progress(value):
         progress.append(value)
@@ -259,16 +260,22 @@ async def test_summary_service_reports_progress_and_resolves_final_result(tmp_pa
         nonlocal finalizing
         finalizing += 1
 
+    async def on_generating_chapters():
+        nonlocal generating_chapters
+        generating_chapters += 1
+
     result = await service.generate(
         sample_transcript(segment_count=8, text_size=420),
         title=None,
         output_language="en",
         on_progress=on_progress,
+        on_generating_chapters=on_generating_chapters,
         on_finalizing=on_finalizing,
     )
 
     assert provider.chunk_calls == 4
-    assert progress[-1] == 95
+    assert progress[-1] == 1
     assert progress == sorted(progress)
     assert finalizing == 1
+    assert generating_chapters == 1
     assert result.outline[0].evidence[0].id == "seg-00002"

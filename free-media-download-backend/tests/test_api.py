@@ -39,6 +39,8 @@ def test_health_has_stable_shape():
         "ffmpeg",
         "anonymous_browser",
         "request_impersonation",
+        "transcription",
+        "transcription_provider",
     }
 
 

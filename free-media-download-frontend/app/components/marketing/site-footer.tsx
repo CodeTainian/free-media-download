@@ -40,6 +40,13 @@ export function SiteFooter({
           <a href={`${repository}/issues`} target="_blank" rel="noreferrer">
             {dictionary.footer.contact}
           </a>
+          <a
+            href="https://www.bubbleai.cloud/"
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            {dictionary.footer.bubbleCloud} ↗
+          </a>
         </div>
         <div>
           <strong>{dictionary.footer.legal}</strong>

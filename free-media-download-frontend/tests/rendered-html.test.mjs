@@ -32,6 +32,8 @@ test("server-renders English and Chinese Bubble Video AI pages", async () => {
   assert.match(chineseHtml, /<html lang="zh-CN"/);
   assert.match(chineseHtml, /把任意视频，变成真正能用的知识/);
   assert.match(chineseHtml, /无需注册/);
+  assert.match(chineseHtml, /Bubble AI Cloud/);
+  assert.match(chineseHtml, /https:\/\/www\.bubbleai\.cloud\//);
   assert.doesNotMatch(
     `${englishHtml}${chineseHtml}`,
     /codex-preview|Your site is taking shape|react-loading-skeleton/i,
@@ -60,8 +62,9 @@ test("renders localized legal routes", async () => {
   assert.match(await terms.text(), /Terms of use/);
   const privacyHtml = await privacy.text();
   assert.match(privacyHtml, /把隐私说清楚/);
-  assert.match(privacyHtml, /DeepSeek API/);
-  assert.match(privacyHtml, /不会发送视频或音频文件/);
+  assert.match(privacyHtml, /语音转写服务/);
+  assert.match(privacyHtml, /任务成功、失败、超时或取消时立即删除/);
+  assert.match(privacyHtml, /临时音频分块/);
 });
 
 test("keeps the implementation honest, accessible, and split by responsibility", async () => {

@@ -22,9 +22,9 @@ These are representative public-link probes, not platform-wide guarantees.
 | iQIYI | Inconclusive | The old upstream sample no longer returned a video. |
 | Douyu VOD | Runtime gap | The extractor requested PhantomJS, an obsolete runtime not shipped by SaveBolt. |
 
-## AI summary caption compatibility
+## AI summary transcript compatibility
 
-The summary foundation accepts only VTT/SRT caption tracks and deliberately ignores danmaku,
+The summary pipeline prefers VTT/SRT caption tracks and deliberately ignores danmaku,
 live chat, signed subtitle URLs, and subtitles burned into the video image.
 
 | Platform | Caption result | Operating note |
@@ -32,10 +32,16 @@ live chat, signed subtitle URLs, and subtitles burned into the video image.
 | YouTube | Pass | A public English TED sample produced 428 ordered transcript segments covering the full 20:50 video. Manual English captions were selected ahead of automatic translations. |
 | Bilibili | Login-gated | Public video metadata and formats pass, but Bilibili's CC/AI subtitle API reports that login is required. Configure an operator-owned server cookie source and include `bilibili` in `SAVEBOLT_COOKIE_PLATFORMS`; never accept visitor cookies through the API. Without that session, SaveBolt reports captions as unavailable and does not treat danmaku as captions. |
 
-The web UI consumes the probe capability fields directly. It enables AI Summary only for a captioned
-YouTube/Bilibili video within the two-hour limit, otherwise showing a specific reason such as
-`No usable captions`, `YouTube and Bilibili only`, or `Over the 2-hour summary limit`. A supported
-task displays caption fetching, parsing, summarizing, and evidence finalization as separate stages.
+The web UI consumes the probe capability fields directly. Within the two-hour limit, it enables AI
+Summary for captioned YouTube/Bilibili videos and for public audio when the server operator has
+configured the speech-to-text provider. Probe responses distinguish `captions`,
+`audio_transcription`, `unavailable`, and `unsupported`; audio transcription never expands the
+platform allowlist or changes the public-content requirement.
+
+The interface may report `Audio transcription available`, `Audio transcription is not configured`,
+`YouTube and Bilibili only`, or `Over the 2-hour summary limit`. A supported task displays source
+probing, caption fetching, optional audio extraction/preparation/transcription, transcript parsing,
+summarizing, chapter generation, and evidence finalization as separate stages.
 
 ## Douyin diagnosis and operating solution
 

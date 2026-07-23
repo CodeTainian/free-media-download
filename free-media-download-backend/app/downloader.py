@@ -4,10 +4,12 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
 from urllib.request import getproxies
@@ -48,6 +50,16 @@ class DownloadError(RuntimeError):
 
 
 ProgressCallback = Callable[[float, str | None, int | None], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSource:
+    platform: str
+    normalized_url: str
+    source_url: str
+    title: str
+    duration: int | None
+    info: dict[str, object]
 
 
 class PublicResolver(aiohttp.abc.AbstractResolver):
@@ -140,6 +152,7 @@ def _normalize_info(
     source_url: str,
     playlist_item: bool = False,
     platform_key: str | None = None,
+    transcription_ready: bool = False,
 ) -> MediaItem:
     duration = int(info["duration"]) if isinstance(info.get("duration"), (int, float)) else None
     languages = caption_languages(info) if platform_key in SUMMARY_PLATFORMS else []
@@ -147,6 +160,8 @@ def _normalize_info(
         transcript_strategy = "unsupported"
     elif languages:
         transcript_strategy = "captions"
+    elif has_usable_audio(info):
+        transcript_strategy = "audio_transcription"
     else:
         transcript_strategy = "unavailable"
     return MediaItem(
@@ -157,11 +172,29 @@ def _normalize_info(
         thumbnail=str(info["thumbnail"]) if isinstance(info.get("thumbnail"), str) else None,
         uploader=str(info["uploader"])[:160] if isinstance(info.get("uploader"), str) else None,
         is_playlist_item=playlist_item,
-        summary_supported=bool(languages),
+        summary_supported=bool(languages)
+        or (transcript_strategy == "audio_transcription" and transcription_ready),
         caption_languages=languages,
         transcript_strategy_hint=transcript_strategy,
         presets=_build_presets(info),
     )
+
+
+def has_usable_audio(info: dict[str, object]) -> bool:
+    if info.get("is_live") is True or info.get("live_status") in {
+        "is_live",
+        "is_upcoming",
+        "post_live",
+    }:
+        return False
+    formats = info.get("formats")
+    if isinstance(formats, list):
+        return any(
+            isinstance(item, dict)
+            and str(item.get("acodec") or "none").lower() != "none"
+            for item in formats
+        )
+    return str(info.get("acodec") or "none").lower() != "none"
 
 
 def map_process_error(stderr: str) -> DownloadError:
@@ -267,12 +300,14 @@ class YtDlpService:
         self,
         config: Settings,
         browser_sessions: AnonymousBrowserSessionManager | None = None,
+        transcription_ready: Callable[[], bool] | None = None,
     ):
         self.config = config
         self._browser_sessions = browser_sessions or AnonymousBrowserSessionManager(config)
         self._probe_cache: dict[str, tuple[float, ProbeResponse]] = {}
         self._probe_inflight: dict[str, asyncio.Task[ProbeResponse]] = {}
         self._probe_cache_lock = asyncio.Lock()
+        self._transcription_ready = transcription_ready or (lambda: False)
 
     async def close(self) -> None:
         await self._browser_sessions.close()
@@ -338,12 +373,25 @@ class YtDlpService:
         if isinstance(entries, list):
             valid_entries = [entry for entry in entries if isinstance(entry, dict)][: self.config.max_batch_items]
             items = [
-                _normalize_info(entry, normalized, True, platform_key=platform)
+                _normalize_info(
+                    entry,
+                    normalized,
+                    True,
+                    platform_key=platform,
+                    transcription_ready=self._transcription_ready(),
+                )
                 for entry in valid_entries
             ]
             truncated = len(entries) > self.config.max_batch_items
         elif isinstance(payload, dict):
-            items = [_normalize_info(payload, normalized, platform_key=platform)]
+            items = [
+                _normalize_info(
+                    payload,
+                    normalized,
+                    platform_key=platform,
+                    transcription_ready=self._transcription_ready(),
+                )
+            ]
             truncated = False
         else:
             items = []
@@ -543,6 +591,23 @@ class YtDlpService:
         cancel_event: asyncio.Event | None = None,
         on_stage: Callable[[str], Awaitable[None]] | None = None,
     ) -> TranscriptDocument:
+        source = await self.prepare_transcript_source(raw_url)
+        if source.duration and source.duration > self.config.summary_max_duration_seconds:
+            raise DownloadError(
+                "MEDIA_TOO_LONG", "AI summaries are limited to videos up to two hours long."
+            )
+        track = select_caption_track(source.info, preferred_languages)
+        if not track:
+            raise DownloadError("NO_CAPTIONS", "This video does not have usable captions.")
+        return await self.fetch_caption_transcript_from_source(
+            source,
+            output_dir,
+            track,
+            cancel_event=cancel_event,
+            on_stage=on_stage,
+        )
+
+    async def prepare_transcript_source(self, raw_url: str) -> TranscriptSource:
         platform, normalized = classify_url(raw_url)
         if platform not in SUMMARY_PLATFORMS:
             raise DownloadError(
@@ -564,16 +629,30 @@ class YtDlpService:
             info = payload
 
         duration = int(info["duration"]) if isinstance(info.get("duration"), (int, float)) else None
-        if duration and duration > self.config.summary_max_duration_seconds:
-            raise DownloadError(
-                "MEDIA_TOO_LONG", "AI summaries are limited to videos up to two hours long."
-            )
-        track = select_caption_track(info, preferred_languages)
-        if not track:
-            raise DownloadError("NO_CAPTIONS", "This video does not have usable captions.")
+        return TranscriptSource(
+            platform=platform,
+            normalized_url=normalized,
+            source_url=str(info.get("webpage_url") or info.get("url") or normalized),
+            title=str(info.get("title") or "Untitled media")[:240],
+            duration=duration,
+            info=info,
+        )
 
+    async def fetch_caption_transcript_from_source(
+        self,
+        source: TranscriptSource,
+        output_dir: Path,
+        track: CaptionTrack,
+        *,
+        cancel_event: asyncio.Event | None = None,
+        on_stage: Callable[[str], Awaitable[None]] | None = None,
+    ) -> TranscriptDocument:
         caption_file = await self._download_caption_file(
-            platform, normalized, output_dir, track, cancel_event
+            source.platform,
+            source.normalized_url,
+            output_dir,
+            track,
+            cancel_event,
         )
         if on_stage:
             await on_stage("parsing")
@@ -581,14 +660,173 @@ class YtDlpService:
         if not segments:
             raise DownloadError("NO_CAPTIONS", "This video does not have usable captions.")
         return TranscriptDocument(
-            source_url=str(info.get("webpage_url") or info.get("url") or normalized),
-            title=str(info.get("title") or "Untitled media")[:240],
-            platform=platform,
-            duration=duration,
+            source_url=source.source_url,
+            title=source.title,
+            platform=source.platform,
+            duration=source.duration,
             language=track.language,
             source_kind=track.source_kind,
             segments=segments,
         )
+
+    async def extract_transcription_audio(
+        self,
+        source: TranscriptSource,
+        output_dir: Path,
+        cancel_event: asyncio.Event,
+        on_progress: Callable[[float], Awaitable[None]],
+    ) -> Path:
+        if source.platform not in SUMMARY_PLATFORMS or not has_usable_audio(source.info):
+            raise DownloadError(
+                "UNSUPPORTED_AUDIO_SOURCE",
+                "This public source does not expose a supported audio track.",
+            )
+        if (
+            source.duration
+            and source.duration > self.config.transcription_max_duration_seconds
+        ):
+            raise DownloadError(
+                "AUDIO_TOO_LONG",
+                "Audio transcription is limited to videos up to two hours long.",
+            )
+        if cancel_event.is_set():
+            raise DownloadError("CANCELLED", "The summary job was cancelled.")
+
+        summary_root = (self.config.data_dir / "summaries").resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        resolved_output = output_dir.resolve()
+        if not resolved_output.is_relative_to(summary_root):
+            raise DownloadError(
+                "AUDIO_EXTRACTION_FAILED",
+                "The temporary audio workspace is invalid.",
+            )
+        token = secrets.token_urlsafe(18).replace("-", "").replace("_", "")
+        template = str(output_dir / f"{token}.%(ext)s")
+        platform_args = await self._resolved_platform_args(
+            source.platform, source.normalized_url
+        )
+        command = [
+            self.config.yt_dlp_binary,
+            "--newline",
+            "--no-warnings",
+            "--no-colors",
+            "--ignore-config",
+            "--no-playlist",
+            "--use-extractors",
+            "default,-generic",
+            "--js-runtimes",
+            self.config.yt_dlp_js_runtime,
+            "--max-filesize",
+            str(self.config.max_file_bytes),
+            "--match-filter",
+            f"duration <= {self.config.transcription_max_duration_seconds} & !is_live",
+            "--progress-template",
+            "download:SBPROGRESS|%(progress._percent_str)s",
+            "-f",
+            "ba/b",
+            "-o",
+            template,
+        ]
+        command.extend(platform_args)
+        command.append(source.normalized_url)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise DownloadError(
+                "AUDIO_EXTRACTION_FAILED",
+                "The media engine is unavailable for audio extraction.",
+                True,
+            ) from exc
+
+        stderr_chunks: list[bytes] = []
+
+        async def read_stderr() -> None:
+            assert process.stderr
+            while chunk := await process.stderr.readline():
+                stderr_chunks.append(chunk)
+                if sum(map(len, stderr_chunks)) > 24_000:
+                    stderr_chunks.pop(0)
+
+        stderr_task = asyncio.create_task(read_stderr())
+        deadline = time.monotonic() + min(
+            self.config.item_timeout_seconds,
+            self.config.transcription_timeout_seconds,
+        )
+        try:
+            assert process.stdout
+            while process.returncode is None:
+                if cancel_event.is_set():
+                    await terminate_process(process)
+                    raise DownloadError("CANCELLED", "The summary job was cancelled.")
+                if time.monotonic() >= deadline:
+                    await terminate_process(process)
+                    raise DownloadError(
+                        "AUDIO_EXTRACTION_FAILED",
+                        "Audio extraction took too long.",
+                        True,
+                    )
+                try:
+                    line = await asyncio.wait_for(process.stdout.readline(), timeout=0.5)
+                except TimeoutError:
+                    continue
+                if not line:
+                    await process.wait()
+                    break
+                decoded = line.decode("utf-8", "replace").strip()
+                if decoded.startswith("SBPROGRESS|"):
+                    match = re.search(r"([0-9.]+)%", decoded)
+                    if match:
+                        await on_progress(min(1, float(match.group(1)) / 100))
+            await process.wait()
+        except asyncio.CancelledError:
+            await terminate_process(process)
+            raise
+        finally:
+            await stderr_task
+
+        if process.returncode:
+            mapped = map_process_error(
+                b"".join(stderr_chunks).decode("utf-8", "replace")
+            )
+            if mapped.code == "FILE_TOO_LARGE":
+                raise DownloadError(
+                    "AUDIO_TOO_LARGE",
+                    "The extracted audio exceeds the temporary processing limit.",
+                )
+            if mapped.code != "DOWNLOAD_FAILED":
+                raise mapped
+            raise DownloadError(
+                "AUDIO_EXTRACTION_FAILED",
+                "The source platform could not provide a public audio track.",
+                True,
+            )
+        candidates = [
+            path
+            for path in output_dir.glob(f"{token}.*")
+            if path.is_file()
+            and path.resolve().is_relative_to(resolved_output)
+            and path.suffix not in {".part", ".ytdl", ".json"}
+        ]
+        if len(candidates) != 1:
+            raise DownloadError(
+                "AUDIO_EXTRACTION_FAILED",
+                "The media engine did not produce a usable audio track.",
+                True,
+            )
+        result = candidates[0]
+        if result.stat().st_size > self.config.max_file_bytes:
+            result.unlink(missing_ok=True)
+            raise DownloadError(
+                "AUDIO_TOO_LARGE",
+                "The extracted audio exceeds the temporary processing limit.",
+            )
+        await on_progress(1)
+        return result
 
     async def _probe_direct(self, normalized: str) -> ProbeResponse:
         final_url, headers = await self._direct_headers(normalized)

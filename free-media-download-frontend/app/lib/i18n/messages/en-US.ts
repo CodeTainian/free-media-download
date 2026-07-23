@@ -36,7 +36,7 @@ export const enUS = {
     eyebrow: "Bubble Video AI",
     title: "Turn any video into knowledge you can use.",
     description:
-      "Paste a public video link. Bubble Video AI turns supported captions into a sourced summary and timestamped chapters. Uploads and richer knowledge views are in preview.",
+      "Paste a public video link. Bubble Video AI reads captions first, transcribes supported public audio when needed, then creates a sourced summary and timestamped chapters.",
     proofs: ["No account required", "Public media only", "Temporary processing"],
     platforms: "YouTube · Bilibili · TikTok · Instagram · X · Vimeo · direct media",
   },
@@ -74,12 +74,17 @@ export const enUS = {
     captions: "caption tracks",
     englishOutput: "English AI output",
     analyzeKnowledge: "Create knowledge",
+    transcribeAndSummarize: "Transcribe & summarize",
     starting: "Starting AI…",
-    noCaptions: "No usable captions — ASR is in preview",
+    audioTranscriptionAvailable: "Audio transcription available",
+    transcriptionUnavailable: "Audio transcription is not configured on this server",
+    noCaptions: "No usable captions or supported public audio",
     unsupported: "Summary supports YouTube and Bilibili today",
     tooLong: "Over the 2-hour summary limit",
     aiConsent:
-      "AI Summary sends caption text and timestamps to the configured AI provider. No audio or full video is sent.",
+      "Caption summaries send caption text to the configured AI service. No-caption summaries also use the configured transcription service.",
+    asrConsent:
+      "This video has no usable captions. Starting will extract temporary audio and send audio chunks to the configured transcription provider.",
     downloadTitle: "Download permitted media",
     downloadDescription:
       "Choose an output format. Downloads remain secondary to knowledge analysis.",
@@ -127,8 +132,8 @@ export const enUS = {
     items: [
       {
         title: "Videos without captions",
-        description: "Extract temporary audio and transcribe it through ASR.",
-        status: "preview",
+        description: "Securely extract temporary audio and transcribe it when the server has an ASR provider configured.",
+        status: "available",
       },
       {
         title: "Timestamped chapters",
@@ -191,13 +196,13 @@ export const enUS = {
       "Single and batch public links",
       "Downloads and ZIP bundles",
       "Sourced summaries and chapters",
+      "No-caption summaries when ASR is configured",
       "30-minute temporary retention",
     ],
     futureName: "Bubble Video AI Pro",
     futurePrice: "Coming soon",
     futureNote: "No payments accepted",
     futureFeatures: [
-      "No-caption transcription",
       "Full knowledge artifact suite",
       "Multilingual analysis",
       "Richer export formats",
@@ -210,15 +215,15 @@ export const enUS = {
     items: [
       [
         "Does it support videos without captions?",
-        "Not yet in the live backend. Secure temporary-audio extraction and ASR are planned, and the interface marks this capability as Preview.",
+        "Yes for public YouTube and Bilibili videos when the server operator has configured a transcription provider. Captions are always used first.",
       ],
       [
         "Does Bubble Video AI keep my video?",
-        "Completed downloads, temporary captions, and summary results are scheduled for deletion 30 minutes after processing. In-memory jobs also disappear when the API restarts.",
+        "Temporary audio is deleted as soon as a task ends. Completed downloads, captions, transcripts, and summary results are scheduled for deletion after 30 minutes. In-memory jobs also disappear when the API restarts.",
       ],
       [
         "Which platforms are supported?",
-        "Public links from the configured platform allowlist and direct public media files are supported. AI summaries currently require captioned YouTube or Bilibili videos.",
+        "Public links from the configured platform allowlist and direct public media files are supported. AI summaries support public YouTube and Bilibili videos through captions or configured audio transcription.",
       ],
       [
         "How long can a video be?",
@@ -248,6 +253,7 @@ export const enUS = {
     platforms: "Supported platforms",
     documentation: "Documentation",
     contact: "Contact",
+    bubbleCloud: "Bubble AI Cloud",
     copyright: "© 2026 Bubble AI. Public media only.",
     permission: "Use only content you own or are authorized to process.",
   },
@@ -256,7 +262,7 @@ export const enUS = {
     status: "Analysis status",
     sourceInfo: "Source video",
     retention:
-      "Temporary captions and AI results are deleted 30 minutes after completion.",
+      "Temporary audio is deleted when processing ends. Captions, transcripts, and AI results expire after 30 minutes.",
     englishNotice:
       "The interface is bilingual. The current analysis backend still produces English output only.",
     tabs: {
@@ -270,9 +276,14 @@ export const enUS = {
     },
     stages: {
       queued: ["Waiting in queue", "Analysis will start when the AI worker is available."],
+      probing: ["Checking the source", "Confirming the public video and its supported media tracks."],
       fetching_captions: ["Reading captions", "Selecting the best supported caption track."],
-      parsing: ["Cleaning transcript", "Normalizing timing and repeated caption lines."],
+      extracting_audio: ["Extracting temporary audio", "Preparing the public audio track inside this task's isolated workspace."],
+      preparing_audio: ["Preparing speech audio", "Normalizing audio to mono 16 kHz and creating provider-safe chunks."],
+      transcribing: ["Transcribing audio", "Converting completed audio chunks into timestamped text."],
+      parsing_transcript: ["Cleaning transcript", "Normalizing timing, overlap, and repeated lines."],
       summarizing: ["Structuring knowledge", "Building the overview, chapters, and key points."],
+      generating_chapters: ["Building chapters", "Organizing the narrative around timestamped source evidence."],
       finalizing: ["Checking evidence", "Matching generated claims to source timestamps."],
       completed: ["Analysis ready", "The available knowledge views are ready to explore."],
     },
@@ -311,6 +322,16 @@ export const enUS = {
     JOB_CANCEL_FAILED: "The download job could not be cancelled.",
     SUMMARY_FAILED: "The AI analysis could not be started.",
     SUMMARY_CANCEL_FAILED: "The AI analysis could not be cancelled.",
+    AUDIO_EXTRACTION_FAILED: "The public audio track could not be extracted.",
+    AUDIO_TOO_LONG: "This audio exceeds the 2-hour transcription limit.",
+    AUDIO_TOO_LARGE: "The audio exceeds the safe transcription size limit.",
+    TRANSCRIPTION_NOT_CONFIGURED: "Audio transcription is not configured on this server.",
+    TRANSCRIPTION_PROVIDER_UNAVAILABLE: "The transcription provider is temporarily unavailable.",
+    TRANSCRIPTION_RATE_LIMITED: "The transcription provider is rate limiting requests. Try again later.",
+    TRANSCRIPTION_TIMEOUT: "Audio transcription took too long. Try again.",
+    TRANSCRIPTION_FAILED: "The audio could not be transcribed.",
+    TRANSCRIPT_EMPTY: "No speech was detected in the audio.",
+    UNSUPPORTED_AUDIO_SOURCE: "This source does not expose a supported public audio track.",
   },
   legal: {
     back: "Back to Bubble Video AI",
@@ -318,9 +339,9 @@ export const enUS = {
     privacyIntro:
       "Bubble Video AI works without an account, permanent history, advertising trackers, or visitor cookies for source platforms.",
     privacySections: [
-      ["01 / What is processed", "Public URLs, request information needed for rate limiting, media metadata, temporary job status, generated files, selected captions, and AI summaries."],
-      ["02 / AI provider", "AI Summary is optional. Caption text, timestamps, and the video title are sent to the configured DeepSeek API. Video and audio files are not sent."],
-      ["03 / Retention", "Jobs are held in memory. Completed media, temporary captions, and summaries are scheduled for deletion 30 minutes after processing."],
+      ["01 / What is processed", "Public URLs, request information needed for rate limiting, media metadata, temporary job status, generated files, captions, transcripts, and AI summaries. For a video without captions, temporary audio is extracted."],
+      ["02 / AI providers", "Caption summaries send caption text, timestamps, and the title to the configured summary provider. When captions are unavailable, temporary audio chunks are sent to the configured transcription provider. A future local transcription engine can avoid that audio transfer."],
+      ["03 / Retention", "Jobs are held in memory. Temporary audio is deleted immediately when the task succeeds, fails, times out, or is cancelled. Completed media, captions, transcripts, and summaries are scheduled for deletion after 30 minutes."],
       ["04 / Source platforms", "The service requests public media from supported source platforms. It never receives or forwards visitor platform cookies."],
       ["05 / Public launch", "A production operator must add an operational privacy contact, hosting details, jurisdiction-specific disclosures, and provider terms before public launch."],
     ],

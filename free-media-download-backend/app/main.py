@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .audio_processor import AudioProcessor
 from .config import settings
 from .downloader import DownloadError, YtDlpService, binary_available
 from .jobs import JobManager
@@ -30,6 +31,8 @@ from .models import (
 from .security import UnsafeUrlError, classify_url
 from .summary_jobs import SummaryJobManager
 from .summary_provider import DeepSeekSummaryProvider, SummaryError, SummaryService
+from .transcript_acquisition import TranscriptAcquisitionService
+from .transcription_provider import build_transcription_provider
 from .transcripts import SUMMARY_PLATFORMS
 
 
@@ -48,10 +51,19 @@ class MemoryRateLimiter:
         return True
 
 
-downloader = YtDlpService(settings)
+transcription_provider = build_transcription_provider(settings)
+downloader = YtDlpService(
+    settings, transcription_ready=transcription_provider.ready
+)
 jobs = JobManager(settings, downloader)
 summary_service = SummaryService(settings, DeepSeekSummaryProvider(settings))
-summaries = SummaryJobManager(settings, downloader, summary_service)
+transcript_acquisition = TranscriptAcquisitionService(
+    settings,
+    downloader,
+    AudioProcessor(settings),
+    transcription_provider,
+)
+summaries = SummaryJobManager(settings, transcript_acquisition, summary_service)
 limiter = MemoryRateLimiter()
 
 
@@ -203,6 +215,12 @@ async def health() -> HealthResponse:
         javascript_runtime=javascript_ready,
         anonymous_browser=browser_ready,
         request_impersonation=impersonation_ready,
+        transcription=transcription_provider.ready(),
+        transcription_provider=(
+            settings.transcription_provider
+            if settings.transcription_provider != "none"
+            else None
+        ),
         yt_dlp_version=version,
     )
 
