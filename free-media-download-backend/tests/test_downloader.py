@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.downloader import DownloadError, YtDlpService, _build_presets, map_process_error
-from app.config import Settings
+from app.config import Settings, _yt_dlp_binary
 from app.models import ProbeResponse
 
 
@@ -36,10 +36,30 @@ def test_direct_probe_requires_original_preset(tmp_path):
     assert service.config.max_batch_items == 10
 
 
+def test_yt_dlp_auto_discovers_current_virtual_environment(tmp_path, monkeypatch):
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    python = binary_dir / "python"
+    yt_dlp = binary_dir / "yt-dlp"
+    python.touch()
+    yt_dlp.touch(mode=0o755)
+    monkeypatch.delenv("SAVEBOLT_YTDLP_BINARY", raising=False)
+    monkeypatch.setattr("app.config.sys.executable", str(python))
+    monkeypatch.setattr("app.config.shutil.which", lambda _name: None)
+
+    assert _yt_dlp_binary() == str(yt_dlp)
+
+
+def test_explicit_yt_dlp_binary_takes_precedence(monkeypatch):
+    monkeypatch.setenv("SAVEBOLT_YTDLP_BINARY", "/opt/savebolt/yt-dlp")
+    assert _yt_dlp_binary() == "/opt/savebolt/yt-dlp"
+
+
 def test_browser_session_is_only_added_to_configured_platform_commands(tmp_path):
     service = YtDlpService(Settings(data_dir=tmp_path, cookies_from_browser="chrome"))
     assert service._platform_args("youtube") == ["--cookies-from-browser", "chrome"]
-    assert service._platform_args("bilibili") == []
+    assert service._platform_args("bilibili") == ["--cookies-from-browser", "chrome"]
+    assert service._platform_args("vimeo") == []
 
 
 def test_browser_session_can_be_enabled_for_douyin(tmp_path):

@@ -8,6 +8,8 @@ type Mode = "single" | "batch";
 type OutputKind = "video" | "audio" | "original";
 type ItemStatus = "queued" | "running" | "ready" | "failed" | "cancelled";
 type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+type TranscriptStrategy = "captions" | "unavailable" | "unsupported";
+type SummaryStage = "queued" | "fetching_captions" | "parsing" | "summarizing" | "finalizing" | "completed";
 
 type ApiError = {
   code: string;
@@ -33,6 +35,9 @@ type MediaItem = {
   thumbnail?: string | null;
   uploader?: string | null;
   is_playlist_item: boolean;
+  summary_supported: boolean;
+  caption_languages: string[];
+  transcript_strategy_hint: TranscriptStrategy;
   presets: Preset[];
 };
 
@@ -60,7 +65,52 @@ type Job = {
   bundle_ready: boolean;
 };
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
+type SummaryEvidence = {
+  id: string;
+  start_seconds: number;
+  end_seconds: number;
+  text: string;
+};
+
+type SummaryOutlineItem = {
+  timestamp_seconds: number;
+  title: string;
+  summary: string;
+  evidence: SummaryEvidence[];
+};
+
+type SummaryKeyPoint = {
+  title: string;
+  explanation: string;
+  evidence: SummaryEvidence[];
+};
+
+type SummaryResult = {
+  source_url: string;
+  title: string;
+  platform: string;
+  duration?: number | null;
+  caption_language: string;
+  caption_source: "manual_caption" | "automatic_caption";
+  output_language: "en";
+  overview: string;
+  outline: SummaryOutlineItem[];
+  key_points: SummaryKeyPoint[];
+};
+
+type SummaryJob = {
+  id: string;
+  status: JobStatus;
+  stage: SummaryStage;
+  progress: number;
+  created_at: string;
+  expires_at?: string | null;
+  result?: SummaryResult | null;
+  error?: ApiError | null;
+};
+
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
+const SUMMARY_MAX_DURATION_SECONDS = 2 * 60 * 60;
 const platforms = [
   "YouTube",
   "Bilibili",
@@ -88,6 +138,7 @@ const eventNames = [
   "completed",
   "cancelled",
 ];
+const summaryEventNames = ["queued", "started", "stage_changed", "progress", "completed", "failed", "cancelled"];
 
 function durationLabel(seconds?: number | null) {
   if (!seconds) return "Length unknown";
@@ -110,6 +161,58 @@ function statusLabel(status: JobStatus | ItemStatus) {
   return status.replace("_", " ");
 }
 
+function summaryStageLabel(stage: SummaryStage) {
+  const labels: Record<SummaryStage, string> = {
+    queued: "Waiting in queue",
+    fetching_captions: "Reading captions",
+    parsing: "Cleaning transcript",
+    summarizing: "Building the knowledge map",
+    finalizing: "Checking every source",
+    completed: "Summary ready",
+  };
+  return labels[stage];
+}
+
+function summaryStageDetail(stage: SummaryStage) {
+  const details: Record<SummaryStage, string> = {
+    queued: "Your summary will start as soon as the AI worker is free.",
+    fetching_captions: "SaveBolt is selecting the best available caption track.",
+    parsing: "Caption timing and repeated lines are being normalized.",
+    summarizing: "The video is being condensed into an outline and key ideas.",
+    finalizing: "Claims are being matched back to original-language caption evidence.",
+    completed: "The summary and its source evidence are ready to review.",
+  };
+  return details[stage];
+}
+
+function summaryUnavailableReason(item: MediaItem) {
+  if (item.duration && item.duration > SUMMARY_MAX_DURATION_SECONDS) return "Over the 2-hour summary limit";
+  if (item.summary_supported) return null;
+  if (item.transcript_strategy_hint === "unavailable") return "No usable captions";
+  return "YouTube and Bilibili only";
+}
+
+function timestampUrl(sourceUrl: string, seconds: number) {
+  try {
+    const url = new URL(sourceUrl);
+    const time = Math.max(0, Math.floor(seconds));
+    url.searchParams.set("t", url.hostname.includes("youtu") ? `${time}s` : String(time));
+    return url.toString();
+  } catch {
+    return sourceUrl;
+  }
+}
+
+function summaryCopyText(result: SummaryResult) {
+  const outline = result.outline
+    .map((item) => `${durationLabel(item.timestamp_seconds)} — ${item.title}\n${item.summary}`)
+    .join("\n\n");
+  const keyPoints = result.key_points
+    .map((item) => `• ${item.title}: ${item.explanation}`)
+    .join("\n");
+  return `${result.title}\n\nOverview\n${result.overview}\n\nTimeline\n${outline}\n\nKey points\n${keyPoints}\n\nSource: ${result.source_url}`;
+}
+
 async function readError(response: Response): Promise<ApiError> {
   try {
     const data = (await response.json()) as Partial<ApiError>;
@@ -124,15 +227,49 @@ async function readError(response: Response): Promise<ApiError> {
   }
 }
 
+function EvidenceList({
+  evidence,
+  sourceUrl,
+  language,
+}: {
+  evidence: SummaryEvidence[];
+  sourceUrl: string;
+  language: string;
+}) {
+  if (!evidence.length) return null;
+  return (
+    <div className="evidence-list">
+      {evidence.map((quote, index) => (
+        <details key={`${quote.id}-${index}`}>
+          <summary>
+            <span>Source evidence · {durationLabel(quote.start_seconds)}</span>
+            <span aria-hidden="true">+</span>
+          </summary>
+          <blockquote lang={language}>{quote.text}</blockquote>
+          <a href={timestampUrl(sourceUrl, quote.start_seconds)} target="_blank" rel="noreferrer">
+            Open source at {durationLabel(quote.start_seconds)}
+            <span aria-hidden="true"> ↗</span>
+          </a>
+        </details>
+      ))}
+    </div>
+  );
+}
+
 export function DownloadStudio() {
   const [mode, setMode] = useState<Mode>("single");
   const [input, setInput] = useState("");
   const [items, setItems] = useState<Selection[]>([]);
   const [job, setJob] = useState<Job | null>(null);
+  const [summaryJob, setSummaryJob] = useState<SummaryJob | null>(null);
+  const [summarySource, setSummarySource] = useState<Selection | null>(null);
+  const [summaryStartingId, setSummaryStartingId] = useState<string | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [proOpen, setProOpen] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const summaryEventSourceRef = useRef<EventSource | null>(null);
   const proDialogRef = useRef<HTMLElement | null>(null);
   const proCloseRef = useRef<HTMLButtonElement | null>(null);
 
@@ -141,7 +278,19 @@ export function DownloadStudio() {
     [input],
   );
 
-  useEffect(() => () => eventSourceRef.current?.close(), []);
+  useEffect(
+    () => () => {
+      eventSourceRef.current?.close();
+      summaryEventSourceRef.current?.close();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (copyState === "idle") return;
+    const timer = window.setTimeout(() => setCopyState("idle"), 2500);
+    return () => window.clearTimeout(timer);
+  }, [copyState]);
 
   useEffect(() => {
     if (!proOpen) return;
@@ -179,6 +328,10 @@ export function DownloadStudio() {
     setInput("");
     setItems([]);
     setJob(null);
+    setSummaryJob(null);
+    setSummarySource(null);
+    setSummaryStartingId(null);
+    summaryEventSourceRef.current?.close();
     setError(null);
   }
 
@@ -269,6 +422,92 @@ export function DownloadStudio() {
     };
   }
 
+  function watchSummary(nextSummary: SummaryJob, eventsUrl: string) {
+    summaryEventSourceRef.current?.close();
+    setSummaryJob(nextSummary);
+    const source = new EventSource(`${API_BASE}${eventsUrl}`);
+    summaryEventSourceRef.current = source;
+    const handler = (event: Event) => {
+      const message = event as MessageEvent<string>;
+      try {
+        const payload = JSON.parse(message.data) as { summary: SummaryJob };
+        setSummaryJob(payload.summary);
+        if (["completed", "failed", "cancelled"].includes(payload.summary.status)) source.close();
+      } catch {
+        // Ignore malformed progress frames while keeping the connection alive.
+      }
+    };
+    summaryEventNames.forEach((name) => source.addEventListener(name, handler));
+    source.onerror = () => {
+      if (source.readyState === EventSource.CLOSED) return;
+      fetch(`${API_BASE}/api/v1/summaries/${nextSummary.id}`)
+        .then((response) => (response.ok ? response.json() : null))
+        .then((snapshot: SummaryJob | null) => {
+          if (!snapshot) return;
+          setSummaryJob(snapshot);
+          if (["completed", "failed", "cancelled"].includes(snapshot.status)) source.close();
+        })
+        .catch(() => undefined);
+    };
+  }
+
+  async function startSummary(item: Selection) {
+    const unavailableReason = summaryUnavailableReason(item);
+    if (unavailableReason) {
+      setError({ code: "SUMMARY_UNAVAILABLE", message: unavailableReason });
+      return;
+    }
+    setSummaryStartingId(item.selectionId);
+    setSummarySource(item);
+    setSummaryJob(null);
+    setCopyState("idle");
+    setError(null);
+    summaryEventSourceRef.current?.close();
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/summaries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: item.source_url, title: item.title, output_language: "en" }),
+      });
+      if (!response.ok) throw await readError(response);
+      const data = (await response.json()) as { summary: SummaryJob; events_url: string };
+      watchSummary(data.summary, data.events_url);
+    } catch (caught) {
+      setError(
+        typeof caught === "object" && caught && "message" in caught
+          ? (caught as ApiError)
+          : { code: "SUMMARY_FAILED", message: "The AI summary could not be started.", retryable: true },
+      );
+    } finally {
+      setSummaryStartingId(null);
+    }
+  }
+
+  async function cancelSummary() {
+    if (!summaryJob) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/summaries/${summaryJob.id}`, { method: "DELETE" });
+      if (!response.ok) throw await readError(response);
+      summaryEventSourceRef.current?.close();
+      setSummaryJob({ ...summaryJob, status: "cancelled" });
+    } catch (caught) {
+      setError(
+        typeof caught === "object" && caught && "message" in caught
+          ? (caught as ApiError)
+          : { code: "SUMMARY_CANCEL_FAILED", message: "SaveBolt could not cancel this summary.", retryable: true },
+      );
+    }
+  }
+
+  async function copySummary(result: SummaryResult) {
+    try {
+      await navigator.clipboard.writeText(summaryCopyText(result));
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  }
+
   async function startDownload() {
     if (!items.length) return;
     setBusy(true);
@@ -322,9 +561,9 @@ export function DownloadStudio() {
         <div className="hero-copy">
           <div className="eyebrow"><span className="live-dot" /> Free while we launch</div>
           <h1>Keep the videos<br />you <em>need.</em></h1>
-          <p className="hero-lede">Paste a public link. Pick the quality. Keep it offline—without an account, an app, or a maze of pop-ups.</p>
+          <p className="hero-lede">Paste a public link. Save it offline—or turn a captioned YouTube or Bilibili video into a sourced AI summary.</p>
           <div className="hero-proof" aria-label="Product benefits">
-            <span>No account</span><span>Files auto-delete</span><span>Works on mobile</span>
+            <span>No account</span><span>Sourced AI summaries</span><span>Files auto-delete</span>
           </div>
         </div>
 
@@ -386,23 +625,179 @@ export function DownloadStudio() {
                     <button type="button" onClick={() => applyPresetToAll("mp4-1080")}>Apply 1080p to all</button>
                   )}
                 </div>
-                {items.map((item, index) => (
-                  <article className="media-row" key={item.selectionId}>
-                    <div className="media-index">{String(index + 1).padStart(2, "0")}</div>
-                    {item.thumbnail ? <img src={item.thumbnail} alt="" referrerPolicy="no-referrer" /> : <div className="media-placeholder" aria-hidden="true">▶</div>}
-                    <div className="media-copy">
-                      <span>{item.platform} · {durationLabel(item.duration)}</span>
-                      <h3>{item.title}</h3>
-                    </div>
-                    <label className="preset-select">
-                      <span className="sr-only">Output format for {item.title}</span>
-                      <select value={item.presetId} onChange={(event) => updatePreset(item.selectionId, event.target.value)}>
-                        {item.presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.label}</option>)}
-                      </select>
-                    </label>
-                  </article>
-                ))}
+                {items.some((item) => !summaryUnavailableReason(item)) && (
+                  <p className="summary-consent-note">
+                    <span aria-hidden="true">AI</span>
+                    Choosing AI Summary sends the selected caption text to our AI provider. No audio or full video is sent.
+                  </p>
+                )}
+                {items.map((item, index) => {
+                  const unavailableReason = summaryUnavailableReason(item);
+                  const summaryIsActive =
+                    summaryJob && !["completed", "failed", "cancelled"].includes(summaryJob.status);
+                  const isStarting = summaryStartingId === item.selectionId;
+                  const summaryNoteId = `summary-note-${index}`;
+                  return (
+                    <article className="media-row" key={item.selectionId}>
+                      <div className="media-index">{String(index + 1).padStart(2, "0")}</div>
+                      {item.thumbnail ? <img src={item.thumbnail} alt="" referrerPolicy="no-referrer" /> : <div className="media-placeholder" aria-hidden="true">▶</div>}
+                      <div className="media-copy">
+                        <span>{item.platform} · {durationLabel(item.duration)}</span>
+                        <h3>{item.title}</h3>
+                      </div>
+                      <div className="media-actions">
+                        <label className="preset-select">
+                          <span className="sr-only">Output format for {item.title}</span>
+                          <select value={item.presetId} onChange={(event) => updatePreset(item.selectionId, event.target.value)}>
+                            {item.presets.map((preset) => <option value={preset.id} key={preset.id}>{preset.label}</option>)}
+                          </select>
+                        </label>
+                        <button
+                          className="summary-trigger"
+                          type="button"
+                          onClick={() => startSummary(item)}
+                          disabled={Boolean(unavailableReason) || Boolean(summaryIsActive) || isStarting}
+                          aria-describedby={summaryNoteId}
+                        >
+                          <span>{isStarting ? "Starting AI…" : "AI summary"}</span>
+                          <span aria-hidden="true">✦</span>
+                        </button>
+                        <span className={unavailableReason ? "summary-availability unavailable" : "summary-availability"} id={summaryNoteId}>
+                          {unavailableReason ?? `${item.caption_languages.length || 1} caption ${item.caption_languages.length === 1 ? "track" : "tracks"} · English output`}
+                        </span>
+                      </div>
+                    </article>
+                  );
+                })}
               </div>
+            )}
+
+            {summaryJob && summarySource && (
+              <section
+                className={`summary-panel summary-panel-${summaryJob.status}`}
+                aria-labelledby="summary-heading"
+                aria-live="polite"
+                aria-busy={!["completed", "failed", "cancelled"].includes(summaryJob.status)}
+              >
+                <div className="summary-head">
+                  <div>
+                    <span className="step-label">AI / VIDEO SUMMARY</span>
+                    <h3 id="summary-heading">
+                      {summaryJob.status === "completed" ? "The long version, distilled." : summaryStageLabel(summaryJob.stage)}
+                    </h3>
+                  </div>
+                  <span className={`status-pill status-${summaryJob.status}`}>{statusLabel(summaryJob.status)}</span>
+                </div>
+
+                {!["completed", "failed", "cancelled"].includes(summaryJob.status) && (
+                  <div className="summary-processing">
+                    <p>{summaryStageDetail(summaryJob.stage)}</p>
+                    <div
+                      className="summary-progress"
+                      role="progressbar"
+                      aria-label="AI summary progress"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={Math.round(summaryJob.progress)}
+                    >
+                      <span style={{ width: `${summaryJob.progress}%` }} />
+                    </div>
+                    <div className="summary-progress-meta">
+                      <span>{Math.round(summaryJob.progress)}%</span>
+                      <span>{summarySource.title}</span>
+                    </div>
+                    <div className="summary-privacy">
+                      <span aria-hidden="true">◉</span>
+                      <p>Caption text is sent to our AI provider to create this summary. Temporary captions and results are deleted 30 minutes after completion.</p>
+                    </div>
+                    <button className="text-button" type="button" onClick={cancelSummary}>Cancel summary</button>
+                  </div>
+                )}
+
+                {["failed", "cancelled"].includes(summaryJob.status) && (
+                  <div className="summary-failure" role="alert">
+                    <strong>{summaryJob.error?.code.replaceAll("_", " ") ?? (summaryJob.status === "cancelled" ? "SUMMARY CANCELLED" : "SUMMARY FAILED")}</strong>
+                    <p>{summaryJob.error?.message ?? (summaryJob.status === "cancelled" ? "The summary was cancelled and its temporary captions were removed." : "SaveBolt could not finish this summary.")}</p>
+                    <button className="primary-button" type="button" onClick={() => startSummary(summarySource)}>
+                      Try again <span aria-hidden="true">↻</span>
+                    </button>
+                  </div>
+                )}
+
+                {summaryJob.status === "completed" && summaryJob.result && (
+                  <div className="summary-result">
+                    <div className="summary-result-meta">
+                      <div>
+                        <span>{summaryJob.result.platform}</span>
+                        <span>{durationLabel(summaryJob.result.duration)}</span>
+                        <span>{summaryJob.result.caption_language} {summaryJob.result.caption_source === "manual_caption" ? "captions" : "auto-captions"}</span>
+                      </div>
+                      <button className="copy-summary-button" type="button" onClick={() => copySummary(summaryJob.result!)}>
+                        {copyState === "copied" ? "Copied ✓" : copyState === "failed" ? "Copy failed" : "Copy summary"}
+                      </button>
+                    </div>
+
+                    <div className="summary-overview">
+                      <span className="summary-section-index">01 / OVERVIEW</span>
+                      <p>{summaryJob.result.overview}</p>
+                    </div>
+
+                    <div className="summary-section">
+                      <div className="summary-section-title">
+                        <span className="summary-section-index">02 / TIMELINE</span>
+                        <h4>Follow the argument.</h4>
+                      </div>
+                      <ol className="summary-outline">
+                        {summaryJob.result.outline.map((item, index) => (
+                          <li key={`${item.timestamp_seconds}-${index}`}>
+                            <a
+                              className="summary-time"
+                              href={timestampUrl(summaryJob.result!.source_url, item.timestamp_seconds)}
+                              target="_blank"
+                              rel="noreferrer"
+                              aria-label={`Open source video at ${durationLabel(item.timestamp_seconds)}`}
+                            >
+                              {durationLabel(item.timestamp_seconds)} <span aria-hidden="true">↗</span>
+                            </a>
+                            <div>
+                              <h5>{item.title}</h5>
+                              <p>{item.summary}</p>
+                              <EvidenceList
+                                evidence={item.evidence}
+                                sourceUrl={summaryJob.result.source_url}
+                                language={summaryJob.result.caption_language}
+                              />
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+
+                    <div className="summary-section">
+                      <div className="summary-section-title">
+                        <span className="summary-section-index">03 / KEY POINTS</span>
+                        <h4>What is worth keeping.</h4>
+                      </div>
+                      <div className="summary-key-points">
+                        {summaryJob.result.key_points.map((item, index) => (
+                          <article key={`${item.title}-${index}`}>
+                            <span>{String(index + 1).padStart(2, "0")}</span>
+                            <h5>{item.title}</h5>
+                            <p>{item.explanation}</p>
+                            <EvidenceList
+                              evidence={item.evidence}
+                              sourceUrl={summaryJob.result!.source_url}
+                              language={summaryJob.result!.caption_language}
+                            />
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+
+                    <p className="summary-retention">AI summaries can contain mistakes. Check the linked original-language evidence before relying on a claim. This result expires 30 minutes after completion.</p>
+                  </div>
+                )}
+              </section>
             )}
 
             {job && (
@@ -486,14 +881,14 @@ export function DownloadStudio() {
           <article className="price-card free-card">
             <div className="price-card-head"><span>FREE / LAUNCH</span><span className="current-badge">AVAILABLE NOW</span></div>
             <div className="price"><strong>$0</strong><span>while we launch</span></div>
-            <ul><li>Single and batch downloads</li><li>Up to 10 links per batch</li><li>MP4, source quality, and MP3</li><li>Automatic file deletion</li></ul>
+            <ul><li>Single and batch downloads</li><li>Up to 10 links per batch</li><li>Sourced AI summaries</li><li>Automatic file and summary deletion</li></ul>
             <a href="#download" className="price-action">Start saving <span>↘</span></a>
           </article>
           <article className="price-card pro-card">
             <div className="pro-ribbon">COMING SOON</div>
             <div className="price-card-head"><span>PRO / AT LAUNCH</span><span>SaveBolt+</span></div>
             <div className="price"><strong>$9</strong><span>/ month at launch</span></div>
-            <ul><li>Priority processing queue</li><li>Larger batches and saved presets</li><li>Private download history</li><li>Subtitle translation and AI summaries</li></ul>
+            <ul><li>Priority processing queue</li><li>Larger batches and saved presets</li><li>Private download history</li><li>More languages and export formats</li></ul>
             <button type="button" className="price-action pro-action" onClick={() => setProOpen(true)}>See what’s next <span>→</span></button>
           </article>
         </div>
@@ -506,6 +901,7 @@ export function DownloadStudio() {
           <details><summary>Can it download private or paid videos?<span>+</span></summary><p>No. SaveBolt never accepts visitor cookies and does not bypass DRM, paywalls, regional rights, or private access controls. For strict public platforms, it may use an isolated anonymous server session or an operator-configured session.</p></details>
           <details><summary>Where do completed files go?<span>+</span></summary><p>Your browser saves them through its normal download flow. On iPhone and iPad, they typically appear in the Files app; Android uses the system Downloads folder.</p></details>
           <details><summary>How long are files kept?<span>+</span></summary><p>Completed files remain available for 30 minutes, then the download service removes them automatically.</p></details>
+          <details><summary>How does the AI summary work?<span>+</span></summary><p>For captioned YouTube and Bilibili videos up to two hours, SaveBolt sends temporary caption text—not audio or video—to its AI provider. Results include links back to the original-language evidence and are removed after 30 minutes.</p></details>
         </div>
       </section>
 
@@ -521,7 +917,7 @@ export function DownloadStudio() {
             <button ref={proCloseRef} className="modal-close" type="button" aria-label="Close Pro preview" onClick={() => setProOpen(false)}>×</button>
             <span className="eyebrow">SAVEBOLT PRO</span>
             <h2 id="pro-title">Pay for saved time,<br />not basic access.</h2>
-            <p>Pro is not accepting payments yet. The next release will focus on priority processing, larger batches, useful history, and AI-assisted transcripts.</p>
+            <p>Pro is not accepting payments yet. The next release will focus on priority processing, larger batches, useful history, more summary languages, and richer export formats.</p>
             <button className="primary-button" type="button" onClick={() => setProOpen(false)}>Got it <span>✓</span></button>
           </section>
         </div>

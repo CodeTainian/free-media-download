@@ -29,6 +29,14 @@ from .security import (
     resolve_public_host,
     safe_filename,
 )
+from .transcripts import (
+    SUMMARY_PLATFORMS,
+    CaptionTrack,
+    TranscriptDocument,
+    caption_languages,
+    parse_subtitle_file,
+    select_caption_track,
+)
 
 
 class DownloadError(RuntimeError):
@@ -127,8 +135,20 @@ def _build_presets(info: dict[str, object], direct: bool = False) -> list[Preset
     return presets
 
 
-def _normalize_info(info: dict[str, object], source_url: str, playlist_item: bool = False) -> MediaItem:
+def _normalize_info(
+    info: dict[str, object],
+    source_url: str,
+    playlist_item: bool = False,
+    platform_key: str | None = None,
+) -> MediaItem:
     duration = int(info["duration"]) if isinstance(info.get("duration"), (int, float)) else None
+    languages = caption_languages(info) if platform_key in SUMMARY_PLATFORMS else []
+    if platform_key not in SUMMARY_PLATFORMS:
+        transcript_strategy = "unsupported"
+    elif languages:
+        transcript_strategy = "captions"
+    else:
+        transcript_strategy = "unavailable"
     return MediaItem(
         source_url=str(info.get("webpage_url") or info.get("url") or source_url),
         title=str(info.get("title") or "Untitled media")[:240],
@@ -137,6 +157,9 @@ def _normalize_info(info: dict[str, object], source_url: str, playlist_item: boo
         thumbnail=str(info["thumbnail"]) if isinstance(info.get("thumbnail"), str) else None,
         uploader=str(info["uploader"])[:160] if isinstance(info.get("uploader"), str) else None,
         is_playlist_item=playlist_item,
+        summary_supported=bool(languages),
+        caption_languages=languages,
+        transcript_strategy_hint=transcript_strategy,
         presets=_build_presets(info),
     )
 
@@ -309,6 +332,30 @@ class YtDlpService:
 
         normalized = await self._expand_short_url(platform, normalized)
 
+        payload = await self._load_platform_payload(platform, normalized)
+
+        entries = payload.get("entries") if isinstance(payload, dict) else None
+        if isinstance(entries, list):
+            valid_entries = [entry for entry in entries if isinstance(entry, dict)][: self.config.max_batch_items]
+            items = [
+                _normalize_info(entry, normalized, True, platform_key=platform)
+                for entry in valid_entries
+            ]
+            truncated = len(entries) > self.config.max_batch_items
+        elif isinstance(payload, dict):
+            items = [_normalize_info(payload, normalized, platform_key=platform)]
+            truncated = False
+        else:
+            items = []
+
+        if not items:
+            raise DownloadError("NO_MEDIA", "No downloadable public media was found at this link.")
+        for item in items:
+            if item.duration and item.duration > self.config.max_duration_seconds:
+                raise DownloadError("MEDIA_TOO_LONG", "This media exceeds the six-hour duration limit.")
+        return ProbeResponse(items=items, truncated=truncated)
+
+    async def _load_platform_payload(self, platform: str, normalized: str) -> dict[str, object]:
         stdout, stderr, returncode = await self._run_probe_process(platform, normalized)
         if returncode:
             error = map_process_error(stderr.decode("utf-8", "replace"))
@@ -324,25 +371,12 @@ class YtDlpService:
         try:
             payload = json.loads(stdout.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise DownloadError("INVALID_RESPONSE", "The source returned an unreadable response.", True) from exc
-
-        entries = payload.get("entries") if isinstance(payload, dict) else None
-        if isinstance(entries, list):
-            valid_entries = [entry for entry in entries if isinstance(entry, dict)][: self.config.max_batch_items]
-            items = [_normalize_info(entry, normalized, True) for entry in valid_entries]
-            truncated = len(entries) > self.config.max_batch_items
-        elif isinstance(payload, dict):
-            items = [_normalize_info(payload, normalized)]
-            truncated = False
-        else:
-            items = []
-
-        if not items:
-            raise DownloadError("NO_MEDIA", "No downloadable public media was found at this link.")
-        for item in items:
-            if item.duration and item.duration > self.config.max_duration_seconds:
-                raise DownloadError("MEDIA_TOO_LONG", "This media exceeds the six-hour duration limit.")
-        return ProbeResponse(items=items, truncated=truncated)
+            raise DownloadError(
+                "INVALID_RESPONSE", "The source returned an unreadable response.", True
+            ) from exc
+        if not isinstance(payload, dict):
+            raise DownloadError("INVALID_RESPONSE", "The source returned an unreadable response.", True)
+        return payload
 
     async def _run_probe_process(
         self,
@@ -386,6 +420,175 @@ class YtDlpService:
             await terminate_process(process)
             raise DownloadError("PROBE_TIMEOUT", "The source platform took too long to respond.", True) from exc
         return stdout, stderr, int(process.returncode or 0)
+
+    def _caption_download_command(
+        self,
+        normalized: str,
+        output_dir: Path,
+        track: CaptionTrack,
+        platform_args: list[str],
+    ) -> list[str]:
+        command = [
+            self.config.yt_dlp_binary,
+            "--skip-download",
+            "--no-playlist",
+            "--no-warnings",
+            "--no-colors",
+            "--ignore-config",
+            "--use-extractors",
+            "default,-generic",
+            "--js-runtimes",
+            self.config.yt_dlp_js_runtime,
+            "--sub-langs",
+            track.language,
+            "--sub-format",
+            "vtt/srt",
+            "--output",
+            str(output_dir / "savebolt-caption.%(ext)s"),
+            "--write-auto-subs" if track.automatic else "--write-subs",
+        ]
+        command.extend(platform_args)
+        command.append(normalized)
+        return command
+
+    async def _download_caption_file(
+        self,
+        platform: str,
+        normalized: str,
+        output_dir: Path,
+        track: CaptionTrack,
+        cancel_event: asyncio.Event | None,
+    ) -> Path:
+        if cancel_event and cancel_event.is_set():
+            raise DownloadError("CANCELLED", "The summary job was cancelled.")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        platform_args = await self._resolved_platform_args(platform, normalized)
+        command = self._caption_download_command(normalized, output_dir, track, platform_args)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise DownloadError("SERVICE_UNAVAILABLE", "The media engine is not installed.", True) from exc
+
+        communicate_task = asyncio.create_task(process.communicate())
+        cancel_task = asyncio.create_task(cancel_event.wait()) if cancel_event else None
+        waiters: set[asyncio.Task[object]] = {communicate_task}  # type: ignore[arg-type]
+        if cancel_task:
+            waiters.add(cancel_task)  # type: ignore[arg-type]
+        try:
+            done, _ = await asyncio.wait(
+                waiters,
+                timeout=self.config.summary_caption_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if communicate_task in done:
+                _stdout, stderr = communicate_task.result()
+            elif cancel_task and cancel_task in done and cancel_event and cancel_event.is_set():
+                await terminate_process(process)
+                communicate_task.cancel()
+                await asyncio.gather(communicate_task, return_exceptions=True)
+                raise DownloadError("CANCELLED", "The summary job was cancelled.")
+            else:
+                await terminate_process(process)
+                communicate_task.cancel()
+                await asyncio.gather(communicate_task, return_exceptions=True)
+                raise DownloadError(
+                    "CAPTION_TIMEOUT", "Caption retrieval took too long.", True
+                )
+        except asyncio.CancelledError:
+            await terminate_process(process)
+            communicate_task.cancel()
+            await asyncio.gather(communicate_task, return_exceptions=True)
+            raise
+        finally:
+            if cancel_task:
+                cancel_task.cancel()
+                await asyncio.gather(cancel_task, return_exceptions=True)
+
+        if process.returncode:
+            error = map_process_error(stderr.decode("utf-8", "replace"))
+            if error.code == "DOWNLOAD_FAILED":
+                raise DownloadError(
+                    "CAPTION_DOWNLOAD_FAILED",
+                    "The source platform could not provide this video's captions.",
+                    True,
+                )
+            raise error
+
+        resolved_output_dir = output_dir.resolve()
+        candidates = sorted(
+            (
+                path
+                for path in output_dir.glob("savebolt-caption*")
+                if path.is_file()
+                and path.suffix.lower() in {".vtt", ".srt"}
+                and path.resolve().is_relative_to(resolved_output_dir)
+            ),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        if not candidates:
+            raise DownloadError("NO_CAPTIONS", "This video does not have usable captions.")
+        return candidates[0]
+
+    async def fetch_caption_transcript(
+        self,
+        raw_url: str,
+        output_dir: Path,
+        preferred_languages: tuple[str, ...] = ("en",),
+        cancel_event: asyncio.Event | None = None,
+        on_stage: Callable[[str], Awaitable[None]] | None = None,
+    ) -> TranscriptDocument:
+        platform, normalized = classify_url(raw_url)
+        if platform not in SUMMARY_PLATFORMS:
+            raise DownloadError(
+                "SUMMARY_UNSUPPORTED_PLATFORM",
+                "AI summaries currently support YouTube and Bilibili videos.",
+            )
+        normalized = await self._expand_short_url(platform, normalized)
+        payload = await self._load_platform_payload(platform, normalized)
+        entries = payload.get("entries")
+        if isinstance(entries, list):
+            valid_entries = [entry for entry in entries if isinstance(entry, dict)]
+            if len(valid_entries) != 1:
+                raise DownloadError(
+                    "SUMMARY_SINGLE_VIDEO_REQUIRED",
+                    "AI summaries process one video at a time.",
+                )
+            info = valid_entries[0]
+        else:
+            info = payload
+
+        duration = int(info["duration"]) if isinstance(info.get("duration"), (int, float)) else None
+        if duration and duration > self.config.summary_max_duration_seconds:
+            raise DownloadError(
+                "MEDIA_TOO_LONG", "AI summaries are limited to videos up to two hours long."
+            )
+        track = select_caption_track(info, preferred_languages)
+        if not track:
+            raise DownloadError("NO_CAPTIONS", "This video does not have usable captions.")
+
+        caption_file = await self._download_caption_file(
+            platform, normalized, output_dir, track, cancel_event
+        )
+        if on_stage:
+            await on_stage("parsing")
+        segments = parse_subtitle_file(caption_file)
+        if not segments:
+            raise DownloadError("NO_CAPTIONS", "This video does not have usable captions.")
+        return TranscriptDocument(
+            source_url=str(info.get("webpage_url") or info.get("url") or normalized),
+            title=str(info.get("title") or "Untitled media")[:240],
+            platform=platform,
+            duration=duration,
+            language=track.language,
+            source_kind=track.source_kind,
+            segments=segments,
+        )
 
     async def _probe_direct(self, normalized: str) -> ProbeResponse:
         final_url, headers = await self._direct_headers(normalized)

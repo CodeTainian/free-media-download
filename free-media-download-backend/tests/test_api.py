@@ -60,7 +60,11 @@ def test_probe_endpoint(monkeypatch):
     with TestClient(app) as client:
         response = client.post("/api/v1/media/probe", json={"url": "https://vimeo.com/123"})
     assert response.status_code == 200
-    assert response.json()["items"][0]["title"] == "Public sample"
+    item = response.json()["items"][0]
+    assert item["title"] == "Public sample"
+    assert item["summary_supported"] is False
+    assert item["caption_languages"] == []
+    assert item["transcript_strategy_hint"] == "unsupported"
 
 
 def test_youtube_bot_check_has_retryable_public_error(monkeypatch):

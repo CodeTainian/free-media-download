@@ -28,6 +28,15 @@ class ItemStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class SummaryStage(StrEnum):
+    QUEUED = "queued"
+    FETCHING_CAPTIONS = "fetching_captions"
+    PARSING = "parsing"
+    SUMMARIZING = "summarizing"
+    FINALIZING = "finalizing"
+    COMPLETED = "completed"
+
+
 class ErrorBody(BaseModel):
     code: str
     message: str
@@ -52,6 +61,9 @@ class MediaItem(BaseModel):
     thumbnail: str | None = None
     uploader: str | None = None
     is_playlist_item: bool = False
+    summary_supported: bool = False
+    caption_languages: list[str] = Field(default_factory=list)
+    transcript_strategy_hint: Literal["captions", "unavailable", "unsupported"] = "unsupported"
     presets: list[Preset]
 
 
@@ -109,6 +121,71 @@ class JobView(BaseModel):
 
 class CreateJobResponse(BaseModel):
     job: JobView
+    events_url: str
+
+
+class CreateSummaryRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=4096)
+    title: str | None = Field(default=None, max_length=240)
+    output_language: Literal["en"] = "en"
+
+    @field_validator("url")
+    @classmethod
+    def strip_url(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+
+class SummaryEvidence(BaseModel):
+    id: str
+    start_seconds: float
+    end_seconds: float
+    text: str
+
+
+class SummaryOutlineItem(BaseModel):
+    timestamp_seconds: float
+    title: str
+    summary: str
+    evidence: list[SummaryEvidence]
+
+
+class SummaryKeyPoint(BaseModel):
+    title: str
+    explanation: str
+    evidence: list[SummaryEvidence]
+
+
+class SummaryResult(BaseModel):
+    source_url: str
+    title: str
+    platform: str
+    duration: int | None = None
+    caption_language: str
+    caption_source: Literal["manual_caption", "automatic_caption"]
+    output_language: Literal["en"] = "en"
+    overview: str
+    outline: list[SummaryOutlineItem]
+    key_points: list[SummaryKeyPoint]
+
+
+class SummaryJobView(BaseModel):
+    id: str
+    status: JobStatus
+    stage: SummaryStage
+    progress: float = 0
+    created_at: str
+    expires_at: str | None = None
+    result: SummaryResult | None = None
+    error: ErrorBody | None = None
+
+
+class CreateSummaryResponse(BaseModel):
+    summary: SummaryJobView
     events_url: str
 
 

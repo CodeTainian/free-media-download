@@ -18,13 +18,19 @@ from .jobs import JobManager
 from .models import (
     CreateJobRequest,
     CreateJobResponse,
+    CreateSummaryRequest,
+    CreateSummaryResponse,
     ErrorBody,
     HealthResponse,
     JobView,
     ProbeRequest,
     ProbeResponse,
+    SummaryJobView,
 )
-from .security import UnsafeUrlError
+from .security import UnsafeUrlError, classify_url
+from .summary_jobs import SummaryJobManager
+from .summary_provider import DeepSeekSummaryProvider, SummaryError, SummaryService
+from .transcripts import SUMMARY_PLATFORMS
 
 
 class MemoryRateLimiter:
@@ -44,13 +50,17 @@ class MemoryRateLimiter:
 
 downloader = YtDlpService(settings)
 jobs = JobManager(settings, downloader)
+summary_service = SummaryService(settings, DeepSeekSummaryProvider(settings))
+summaries = SummaryJobManager(settings, downloader, summary_service)
 limiter = MemoryRateLimiter()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     jobs.start()
+    summaries.start()
     yield
+    await summaries.stop()
     await jobs.stop()
     await downloader.close()
 
@@ -111,6 +121,17 @@ async def download_error(_: Request, exc: DownloadError):
         }
         else 422
     )
+    return error_response(status, exc.code, exc.message, exc.retryable)
+
+
+@app.exception_handler(SummaryError)
+async def summary_error(_: Request, exc: SummaryError):
+    if exc.code == "SUMMARY_RATE_LIMITED":
+        status = 429
+    elif exc.code == "SUMMARY_PROVIDER_UNAVAILABLE":
+        status = 503
+    else:
+        status = 422
     return error_response(status, exc.code, exc.message, exc.retryable)
 
 
@@ -201,8 +222,6 @@ async def create_job(payload: CreateJobRequest, request: Request) -> CreateJobRe
         raise DownloadError("RATE_LIMITED", "Too many download jobs were created. Please try again later.", True)
     for index, item in enumerate(payload.items):
         try:
-            from .security import classify_url
-
             platform, _ = classify_url(item.url)
             if platform == "direct" and item.preset_id != "original":
                 raise UnsafeUrlError("Public media file links must use the original file preset.")
@@ -214,12 +233,51 @@ async def create_job(payload: CreateJobRequest, request: Request) -> CreateJobRe
     return CreateJobResponse(job=jobs.view(job), events_url=f"/api/v1/jobs/{job.id}/events")
 
 
+@app.post("/api/v1/summaries", response_model=CreateSummaryResponse, status_code=201)
+async def create_summary(
+    payload: CreateSummaryRequest, request: Request
+) -> CreateSummaryResponse:
+    platform, _ = classify_url(payload.url)
+    if platform not in SUMMARY_PLATFORMS:
+        raise SummaryError(
+            "SUMMARY_UNSUPPORTED_PLATFORM",
+            "AI summaries currently support YouTube and Bilibili videos.",
+        )
+    if not summaries.ready():
+        raise SummaryError(
+            "SUMMARY_PROVIDER_UNAVAILABLE",
+            "AI summaries are not configured on this server.",
+            True,
+        )
+    if not limiter.check(
+        client_key(request), "summary", settings.summary_daily_limit, 24 * 60 * 60
+    ):
+        raise SummaryError(
+            "SUMMARY_RATE_LIMITED",
+            "This network has reached the daily AI summary limit.",
+            True,
+        )
+    job = await summaries.create(payload)
+    return CreateSummaryResponse(
+        summary=summaries.view(job),
+        events_url=f"/api/v1/summaries/{job.id}/events",
+    )
+
+
 @app.get("/api/v1/jobs/{job_id}", response_model=JobView)
 async def get_job(job_id: str) -> JobView:
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return jobs.view(job)
+
+
+@app.get("/api/v1/summaries/{summary_id}", response_model=SummaryJobView)
+async def get_summary(summary_id: str) -> SummaryJobView:
+    summary = summaries.get(summary_id)
+    if not summary:
+        raise HTTPException(status_code=404, detail="Summary not found")
+    return summaries.view(summary)
 
 
 @app.get("/api/v1/jobs/{job_id}/events")
@@ -231,6 +289,20 @@ async def job_events(job_id: str, request: Request):
     after = int(last_id) if last_id.isdigit() else 0
     return StreamingResponse(
         jobs.stream(job, after),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/v1/summaries/{summary_id}/events")
+async def summary_events(summary_id: str, request: Request):
+    summary = summaries.get(summary_id)
+    if not summary:
+        raise HTTPException(status_code=404, detail="Summary not found")
+    last_id = request.headers.get("Last-Event-ID", "0")
+    after = int(last_id) if last_id.isdigit() else 0
+    return StreamingResponse(
+        summaries.stream(summary, after),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -261,4 +333,11 @@ async def download_bundle(job_id: str):
 async def cancel_job(job_id: str):
     if not await jobs.cancel(job_id):
         raise HTTPException(status_code=404, detail="Job not found")
+    return None
+
+
+@app.delete("/api/v1/summaries/{summary_id}", status_code=204)
+async def cancel_summary(summary_id: str):
+    if not await summaries.cancel(summary_id):
+        raise HTTPException(status_code=404, detail="Summary not found")
     return None

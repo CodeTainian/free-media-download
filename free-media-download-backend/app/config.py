@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -43,7 +44,7 @@ def _optional_path(name: str) -> Path | None:
 
 
 def _cookie_platforms() -> frozenset[str]:
-    configured = os.getenv("SAVEBOLT_COOKIE_PLATFORMS", "youtube")
+    configured = os.getenv("SAVEBOLT_COOKIE_PLATFORMS", "youtube,bilibili")
     platforms = frozenset(value.strip().lower() for value in configured.split(",") if value.strip())
     if any(not re.fullmatch(r"[a-z0-9-]+", platform) for platform in platforms):
         raise ValueError("SAVEBOLT_COOKIE_PLATFORMS must contain comma-separated platform keys")
@@ -69,6 +70,16 @@ def _ffmpeg_binary() -> str:
         return "ffmpeg"
 
 
+def _yt_dlp_binary() -> str:
+    configured = os.getenv("SAVEBOLT_YTDLP_BINARY", "").strip()
+    if configured:
+        return configured
+    environment_binary = Path(sys.executable).with_name("yt-dlp")
+    if environment_binary.is_file() and os.access(environment_binary, os.X_OK):
+        return str(environment_binary)
+    return shutil.which("yt-dlp") or "yt-dlp"
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     data_dir: Path = Path(
@@ -85,7 +96,19 @@ class Settings:
     cleanup_interval_seconds: int = _int("SAVEBOLT_CLEANUP_INTERVAL_SECONDS", 5 * 60)
     probe_cache_ttl_seconds: int = _int("SAVEBOLT_PROBE_CACHE_TTL_SECONDS", 5 * 60)
     probe_cache_max_entries: int = _int("SAVEBOLT_PROBE_CACHE_MAX_ENTRIES", 256)
-    yt_dlp_binary: str = os.getenv("SAVEBOLT_YTDLP_BINARY", "yt-dlp")
+    summary_max_duration_seconds: int = _int("SAVEBOLT_SUMMARY_MAX_DURATION_SECONDS", 2 * 60 * 60)
+    summary_caption_timeout_seconds: int = _int("SAVEBOLT_SUMMARY_CAPTION_TIMEOUT_SECONDS", 2 * 60)
+    summary_daily_limit: int = _int("SAVEBOLT_SUMMARY_DAILY_LIMIT", 5)
+    summary_worker_concurrency: int = _int("SAVEBOLT_SUMMARY_WORKER_CONCURRENCY", 2)
+    summary_job_ttl_seconds: int = _int("SAVEBOLT_SUMMARY_JOB_TTL_SECONDS", 30 * 60)
+    summary_request_timeout_seconds: int = _int("SAVEBOLT_SUMMARY_REQUEST_TIMEOUT_SECONDS", 60)
+    summary_chunk_characters: int = _int("SAVEBOLT_SUMMARY_CHUNK_CHARACTERS", 12_000)
+    deepseek_api_key: str | None = field(
+        default=_optional_text("DEEPSEEK_API_KEY"), repr=False
+    )
+    deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+    deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
+    yt_dlp_binary: str = _yt_dlp_binary()
     ffmpeg_binary: str = _ffmpeg_binary()
     yt_dlp_js_runtime: str = os.getenv("SAVEBOLT_YTDLP_JS_RUNTIME", "node")
     cookies_from_browser: str | None = _cookies_from_browser()

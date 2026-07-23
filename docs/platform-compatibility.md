@@ -1,6 +1,6 @@
 # Platform compatibility
 
-Last live check: **2026-07-22** with pinned **yt-dlp 2026.7.4** from the same network as the development API.
+Last live check: **2026-07-23** with pinned **yt-dlp 2026.7.4** from the same network as the development API.
 
 These are representative public-link probes, not platform-wide guarantees.
 
@@ -21,6 +21,21 @@ These are representative public-link probes, not platform-wide guarantees.
 | Xiaohongshu | Upstream extractor gap | Two upstream test pages returned no video formats. |
 | iQIYI | Inconclusive | The old upstream sample no longer returned a video. |
 | Douyu VOD | Runtime gap | The extractor requested PhantomJS, an obsolete runtime not shipped by SaveBolt. |
+
+## AI summary caption compatibility
+
+The summary foundation accepts only VTT/SRT caption tracks and deliberately ignores danmaku,
+live chat, signed subtitle URLs, and subtitles burned into the video image.
+
+| Platform | Caption result | Operating note |
+| --- | --- | --- |
+| YouTube | Pass | A public English TED sample produced 428 ordered transcript segments covering the full 20:50 video. Manual English captions were selected ahead of automatic translations. |
+| Bilibili | Login-gated | Public video metadata and formats pass, but Bilibili's CC/AI subtitle API reports that login is required. Configure an operator-owned server cookie source and include `bilibili` in `SAVEBOLT_COOKIE_PLATFORMS`; never accept visitor cookies through the API. Without that session, SaveBolt reports captions as unavailable and does not treat danmaku as captions. |
+
+The web UI consumes the probe capability fields directly. It enables AI Summary only for a captioned
+YouTube/Bilibili video within the two-hour limit, otherwise showing a specific reason such as
+`No usable captions`, `YouTube and Bilibili only`, or `Over the 2-hour summary limit`. A supported
+task displays caption fetching, parsing, summarizing, and evidence finalization as separate stages.
 
 ## Douyin diagnosis and operating solution
 
