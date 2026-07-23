@@ -1,18 +1,16 @@
 "use client";
 
-/* eslint-disable @next/next/no-img-element -- source thumbnails are displayed directly from supported public media hosts. */
+/* eslint-disable @next/next/no-img-element -- supported source thumbnails are displayed without proxying. */
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import { artifactExportUrl } from "../../lib/api/client";
 import {
-  chaptersMarkdown,
   downloadTextFile,
   durationLabel,
   safeFilename,
-  summaryMarkdown,
   timestampUrl,
 } from "../../lib/api/format";
-import { createWorkspaceModel } from "../../lib/workspace/adapter";
-import type { ArtifactKind } from "../../lib/workspace/types";
+import type { ArtifactKind } from "../../lib/api/types";
 import { DownloadPanel } from "../downloads/download-panel";
 import { useBubbleExperience } from "../experience/experience-context";
 import { BrandLogo } from "../marketing/brand-logo";
@@ -20,34 +18,55 @@ import { LanguageSwitcher } from "../marketing/language-switcher";
 import { ActionButton } from "../ui/action-button";
 import { AlertBanner } from "../ui/alert-banner";
 import { EmptyState } from "../ui/empty-state";
-import { ProgressBar } from "../ui/progress-bar";
-import { ContentSkeleton } from "../ui/skeleton";
+import { ArtifactContent } from "./artifact-content";
 import { ArtifactTabs } from "./artifact-tabs";
-import { ChapterView } from "./views/chapter-view";
-import { SummaryView } from "./views/summary-view";
+
+const coreKinds = new Set<ArtifactKind>(["summary", "chapters", "transcript"]);
 
 export function ResultWorkspace() {
-  const { locale, dictionary, download, summary, showLanding } =
-    useBubbleExperience();
+  const {
+    locale,
+    dictionary,
+    download,
+    analysis,
+    analysisPreferences,
+    showLanding,
+  } = useBubbleExperience();
   const [active, setActive] = useState<ArtifactKind>("summary");
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
-  const source = summary.source;
-
-  const model = useMemo(
-    () =>
-      source
-        ? createWorkspaceModel(source, summary.job, summary.error, dictionary)
-        : null,
-    [dictionary, source, summary.error, summary.job],
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
+    "idle",
   );
+  const source = analysis.source;
+  const job = analysis.job;
+  const artifact = job?.artifacts[active];
+  const payload = analysis.artifactData[active];
 
-  if (!source || !model) {
+  useEffect(() => {
+    if (
+      !job ||
+      coreKinds.has(active) ||
+      artifact?.status === "queued" ||
+      artifact?.status === "running" ||
+      artifact?.status === "completed"
+    ) {
+      return;
+    }
+    void analysis.generateArtifact(active);
+  }, [active, analysis, artifact?.status, job]);
+
+  if (!source) {
     return (
       <main className="workspace-empty-shell">
         <EmptyState
           eyebrow={dictionary.workspace.title}
-          title={dictionary.workspace.emptyTitle}
-          description={dictionary.workspace.emptyDescription}
+          title={
+            analysis.starting
+              ? dictionary.workspace.restoring
+              : dictionary.workspace.emptyTitle
+          }
+          description={
+            analysis.error?.message ?? dictionary.workspace.emptyDescription
+          }
           action={
             <ActionButton type="button" onClick={showLanding}>
               {dictionary.common.back}
@@ -58,19 +77,12 @@ export function ResultWorkspace() {
     );
   }
 
-  const artifact = model.artifacts[active];
-  const result = summary.job?.result ?? null;
-  const stage = summary.job?.stage ?? "queued";
-  const stageCopy = dictionary.workspace.stages[stage];
-  const canExport =
-    Boolean(result) && (active === "summary" || active === "chapters");
+  const canExport = artifact?.status === "completed" && Boolean(payload) && job;
 
   async function copyCurrentView() {
-    if (!result || !canExport) return;
+    if (!payload) return;
     try {
-      await navigator.clipboard.writeText(
-        active === "chapters" ? chaptersMarkdown(result) : summaryMarkdown(result),
-      );
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
       setCopyState("copied");
       window.setTimeout(() => setCopyState("idle"), 2200);
     } catch {
@@ -78,25 +90,26 @@ export function ResultWorkspace() {
     }
   }
 
-  function exportCurrentView(format: "markdown" | "json") {
-    if (!result || !canExport) return;
-    const base = safeFilename(result.title);
-    const suffix = active === "chapters" ? "chapters" : "summary";
-    if (format === "json") {
-      const value = active === "chapters" ? result.outline : result;
-      downloadTextFile(
-        `${base}-${suffix}.json`,
-        JSON.stringify(value, null, 2),
-        "application/json",
-      );
-      return;
-    }
+  function exportClientJson() {
+    if (!payload) return;
     downloadTextFile(
-      `${base}-${suffix}.md`,
-      active === "chapters" ? chaptersMarkdown(result) : summaryMarkdown(result),
-      "text/markdown",
+      `${safeFilename(source!.title)}-${active}.json`,
+      JSON.stringify(payload, null, 2),
+      "application/json",
     );
   }
+
+  function retryCurrent() {
+    if (!job || job.status === "failed" || job.status === "cancelled") {
+      analysis.retry(analysisPreferences);
+      return;
+    }
+    void analysis.generateArtifact(active);
+  }
+
+  const chapters = analysis.artifactData.chapters ?? [];
+  const questions =
+    analysis.result?.canonical_analysis.suggested_questions ?? [];
 
   return (
     <div className="workspace-shell">
@@ -147,8 +160,12 @@ export function ResultWorkspace() {
             <span aria-hidden="true">◷</span>
             <p>{dictionary.workspace.retention}</p>
           </div>
-          {locale === "zh-CN" ? (
-            <div className="language-notice">{dictionary.workspace.englishNotice}</div>
+          {job ? (
+            <div className="analysis-metadata">
+              <span>{job.output_language}</span>
+              <span>{job.detail}</span>
+              <span>{job.status}</span>
+            </div>
           ) : null}
           <DownloadPanel
             controller={download}
@@ -162,12 +179,21 @@ export function ResultWorkspace() {
           id="workspace-content"
           className="workspace-content"
           aria-live="polite"
-          aria-busy={artifact.status === "loading"}
+          aria-busy={!payload && artifact?.status !== "failed"}
         >
           <div className="workspace-toolbar">
             <div>
-              <span className="status-dot status-dot-success" aria-hidden="true" />
-              {stageCopy[0]}
+              <span
+                className={`status-dot ${
+                  artifact?.status === "completed"
+                    ? "status-dot-success"
+                    : "status-dot-brand"
+                }`}
+                aria-hidden="true"
+              />
+              {artifact
+                ? dictionary.workspace.artifactStatuses[artifact.status]
+                : dictionary.workspace.artifactStatuses.queued}
             </div>
             <div className="workspace-export-actions">
               <ActionButton
@@ -182,18 +208,22 @@ export function ResultWorkspace() {
                     ? dictionary.common.copyFailed
                     : dictionary.workspace.copyView}
               </ActionButton>
+              {canExport ? (
+                <a
+                  className="action-button action-button-quiet"
+                  href={artifactExportUrl(job.id, active, "markdown")}
+                >
+                  {dictionary.common.exportMarkdown}
+                </a>
+              ) : (
+                <ActionButton type="button" variant="quiet" disabled>
+                  {dictionary.common.exportMarkdown}
+                </ActionButton>
+              )}
               <ActionButton
                 type="button"
                 variant="quiet"
-                onClick={() => exportCurrentView("markdown")}
-                disabled={!canExport}
-              >
-                {dictionary.common.exportMarkdown}
-              </ActionButton>
-              <ActionButton
-                type="button"
-                variant="quiet"
-                onClick={() => exportCurrentView("json")}
+                onClick={exportClientJson}
                 disabled={!canExport}
               >
                 {dictionary.common.exportJson}
@@ -201,106 +231,59 @@ export function ResultWorkspace() {
             </div>
           </div>
 
+          {analysis.error && job ? <AlertBanner error={analysis.error} /> : null}
           <section
             id={`panel-${active}`}
             role="tabpanel"
             aria-labelledby={`tab-${active}`}
             tabIndex={0}
           >
-            {summary.error && summary.job && !["failed", "cancelled"].includes(summary.job.status) ? (
-              <AlertBanner error={summary.error} />
-            ) : null}
-            {artifact.status === "loading" ? (
-              <div className="analysis-loading">
-                <div className="analysis-loading-copy">
-                  <p className="section-kicker">{dictionary.workspace.status}</p>
-                  <h2>{stageCopy[0]}</h2>
-                  <p>{stageCopy[1]}</p>
-                </div>
-                <ProgressBar
-                  value={summary.job?.progress ?? 0}
-                  label={dictionary.workspace.status}
-                />
-                <div className="progress-meta">
-                  <span>{Math.round(summary.job?.progress ?? 0)}%</span>
-                  <span>{dictionary.common.temporary}</span>
-                </div>
-                <ContentSkeleton />
-                {summary.job ? (
-                  <ActionButton
-                    type="button"
-                    variant="quiet"
-                    onClick={() => void summary.cancel()}
-                  >
-                    {dictionary.workspace.cancelAnalysis}
-                  </ActionButton>
-                ) : null}
-              </div>
-            ) : null}
-            {artifact.status === "failed" ? (
-              <EmptyState
-                eyebrow={artifact.code.replaceAll("_", " ")}
-                title={dictionary.workspace.failedTitle}
-                description={artifact.message}
-                action={
-                  artifact.retryable ? (
-                    <ActionButton type="button" onClick={summary.retry}>
-                      {dictionary.common.retry}
-                    </ActionButton>
-                  ) : undefined
-                }
-              />
-            ) : null}
-            {artifact.status === "empty" ? (
-              <EmptyState
-                eyebrow={dictionary.workspace.title}
-                title={dictionary.workspace.emptyTitle}
-                description={dictionary.workspace.emptyDescription}
-                action={
-                  <ActionButton type="button" onClick={summary.retry}>
-                    {dictionary.common.retry}
-                  </ActionButton>
-                }
-              />
-            ) : null}
-            {artifact.status === "backend-required" ? (
-              <EmptyState
-                eyebrow={dictionary.common.backendRequired}
-                title={dictionary.workspace.unavailableTitle}
-                description={artifact.reason}
-              />
-            ) : null}
-            {artifact.status === "completed" && result && active === "summary" ? (
-              <SummaryView result={result} dictionary={dictionary} />
-            ) : null}
-            {artifact.status === "completed" && result && active === "chapters" ? (
-              <ChapterView result={result} dictionary={dictionary} />
-            ) : null}
+            <ArtifactContent
+              active={active}
+              job={job}
+              data={analysis.artifactData}
+              startError={analysis.error}
+              sourceUrl={source.source_url}
+              dictionary={dictionary}
+              onRetry={retryCurrent}
+              onCancel={() => void analysis.cancel()}
+            />
           </section>
         </main>
 
         <aside className="workspace-context">
           <section>
             <p className="section-kicker">{dictionary.workspace.tabs.chapters}</p>
-            {result?.outline.length ? (
+            {chapters.length ? (
               <ol>
-                {result.outline.map((chapter) => (
-                  <li key={`${chapter.timestamp_seconds}-${chapter.title}`}>
-                    <button type="button" onClick={() => setActive("chapters")}>
-                      <span>{durationLabel(chapter.timestamp_seconds)}</span>
+                {chapters.map((chapter) => (
+                  <li key={chapter.id}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActive("chapters");
+                        requestAnimationFrame(() =>
+                          document.getElementById(chapter.id)?.focus(),
+                        );
+                      }}
+                    >
+                      <span>{durationLabel(chapter.start_seconds)}</span>
                       <strong>{chapter.title}</strong>
                     </button>
                   </li>
                 ))}
               </ol>
             ) : (
-              <p className="context-muted">{stageCopy[1]}</p>
+              <p className="context-muted">{dictionary.workspace.waitingForChapters}</p>
             )}
           </section>
           <section>
             <p className="section-kicker">{dictionary.workspace.suggested}</p>
             <ul className="suggested-list">
-              {dictionary.workspace.suggestedItems.map((item) => (
+              {(questions.length
+                ? questions.map((item) => item.question)
+                : dictionary.workspace.suggestedItems
+              ).map((item) => (
                 <li key={item}>
                   <span aria-hidden="true">?</span>
                   {item}

@@ -208,4 +208,6 @@ class HealthResponse(BaseModel):
     request_impersonation: bool
     transcription: bool
     transcription_provider: str | None = None
+    analysis: bool
+    analysis_provider: str | None = None
     yt_dlp_version: str | None = None

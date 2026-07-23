@@ -1,18 +1,28 @@
 "use client";
 
 import { createContext, useContext } from "react";
+import type { AnalysisJobController } from "../../hooks/use-analysis-job";
 import type { DownloadJobController } from "../../hooks/use-download-job";
-import type { SummaryJobController } from "../../hooks/use-summary-job";
+import type {
+  AnalysisDetail,
+  AnalysisLanguage,
+  MediaSelection,
+} from "../../lib/api/types";
 import type { Locale } from "../../lib/i18n/locales";
 import type { BubbleDictionary } from "../../lib/i18n/messages/en-US";
-import type { MediaSelection } from "../../lib/api/types";
 
 export type ExperienceContextValue = {
   locale: Locale;
   dictionary: BubbleDictionary;
   view: "landing" | "workspace";
   download: DownloadJobController;
-  summary: SummaryJobController;
+  analysis: AnalysisJobController;
+  analysisPreferences: {
+    detail: AnalysisDetail;
+    outputLanguage: AnalysisLanguage;
+  };
+  setAnalysisDetail: (detail: AnalysisDetail) => void;
+  setAnalysisLanguage: (language: AnalysisLanguage) => void;
   startAnalysis: (item: MediaSelection) => void;
   showLanding: () => void;
   openWorkspace: () => void;

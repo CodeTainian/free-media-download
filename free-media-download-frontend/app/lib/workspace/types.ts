@@ -1,13 +1,10 @@
-import type { MediaSelection, SummaryResult } from "../api/types";
+import type {
+  ArtifactKind as ApiArtifactKind,
+  MediaSelection,
+  SummaryResult,
+} from "../api/types";
 
-export type ArtifactKind =
-  | "summary"
-  | "chapters"
-  | "mind_map"
-  | "visual_story"
-  | "dynamic_website"
-  | "interactive_guide"
-  | "transcript";
+export type ArtifactKind = ApiArtifactKind;
 
 export type ArtifactState<T> =
   | { status: "idle" }

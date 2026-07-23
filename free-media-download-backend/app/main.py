@@ -5,16 +5,37 @@ import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .audio_processor import AudioProcessor
+from .analysis_exports import (
+    export_json,
+    export_markdown,
+    export_website_zip,
+)
+from .analysis_jobs import AnalysisJobManager
+from .analysis_models import (
+    AnalysisResult,
+    AnalysisSnapshot,
+    ArtifactKind,
+    ArtifactStatus,
+    ArtifactView,
+    CreateAnalysisRequest,
+    CreateAnalysisResponse,
+    RequestArtifactRequest,
+    WebsiteManifest,
+    WebsiteTheme,
+)
+from .analysis_provider import AnalysisError, DeepSeekAnalysisProvider
 from .config import settings
 from .downloader import DownloadError, YtDlpService, binary_available
+from .frame_extractor import FrameExtractor
 from .jobs import JobManager
 from .models import (
     CreateJobRequest,
@@ -34,6 +55,7 @@ from .summary_provider import DeepSeekSummaryProvider, SummaryError, SummaryServ
 from .transcript_acquisition import TranscriptAcquisitionService
 from .transcription_provider import build_transcription_provider
 from .transcripts import SUMMARY_PLATFORMS
+from .website_renderer import render_website_html
 
 
 class MemoryRateLimiter:
@@ -64,6 +86,13 @@ transcript_acquisition = TranscriptAcquisitionService(
     transcription_provider,
 )
 summaries = SummaryJobManager(settings, transcript_acquisition, summary_service)
+analysis_provider = DeepSeekAnalysisProvider(settings)
+analyses = AnalysisJobManager(
+    settings,
+    transcript_acquisition,
+    analysis_provider,
+    FrameExtractor(settings, downloader),
+)
 limiter = MemoryRateLimiter()
 
 
@@ -71,7 +100,9 @@ limiter = MemoryRateLimiter()
 async def lifespan(_: FastAPI):
     jobs.start()
     summaries.start()
+    analyses.start()
     yield
+    await analyses.stop()
     await summaries.stop()
     await jobs.stop()
     await downloader.close()
@@ -142,6 +173,19 @@ async def summary_error(_: Request, exc: SummaryError):
         status = 429
     elif exc.code == "SUMMARY_PROVIDER_UNAVAILABLE":
         status = 503
+    else:
+        status = 422
+    return error_response(status, exc.code, exc.message, exc.retryable)
+
+
+@app.exception_handler(AnalysisError)
+async def analysis_error(_: Request, exc: AnalysisError):
+    if exc.code == "ANALYSIS_RATE_LIMITED":
+        status = 429
+    elif exc.code == "ANALYSIS_PROVIDER_UNAVAILABLE":
+        status = 503
+    elif exc.code in {"ANALYSIS_NOT_READY", "ARTIFACT_NOT_READY"}:
+        status = 409
     else:
         status = 422
     return error_response(status, exc.code, exc.message, exc.retryable)
@@ -221,6 +265,10 @@ async def health() -> HealthResponse:
             if settings.transcription_provider != "none"
             else None
         ),
+        analysis=analysis_provider.ready(),
+        analysis_provider=(
+            analysis_provider.provider_name if analysis_provider.ready() else None
+        ),
         yt_dlp_version=version,
     )
 
@@ -282,6 +330,37 @@ async def create_summary(
     )
 
 
+@app.post("/api/v1/analyses", response_model=CreateAnalysisResponse, status_code=201)
+async def create_analysis(
+    payload: CreateAnalysisRequest, request: Request
+) -> CreateAnalysisResponse:
+    platform, _ = classify_url(payload.url)
+    if platform not in SUMMARY_PLATFORMS:
+        raise AnalysisError(
+            "ANALYSIS_UNSUPPORTED_PLATFORM",
+            "Video knowledge analysis currently supports YouTube and Bilibili.",
+        )
+    if not analyses.ready():
+        raise AnalysisError(
+            "ANALYSIS_PROVIDER_UNAVAILABLE",
+            "Content analysis is not configured on this server.",
+            True,
+        )
+    if not limiter.check(
+        client_key(request), "analysis", settings.summary_daily_limit, 24 * 60 * 60
+    ):
+        raise AnalysisError(
+            "ANALYSIS_RATE_LIMITED",
+            "This network has reached the daily video analysis limit.",
+            True,
+        )
+    job = await analyses.create(payload)
+    return CreateAnalysisResponse(
+        analysis=analyses.view(job),
+        events_url=f"/api/v1/analyses/{job.id}/events",
+    )
+
+
 @app.get("/api/v1/jobs/{job_id}", response_model=JobView)
 async def get_job(job_id: str) -> JobView:
     job = jobs.get(job_id)
@@ -296,6 +375,133 @@ async def get_summary(summary_id: str) -> SummaryJobView:
     if not summary:
         raise HTTPException(status_code=404, detail="Summary not found")
     return summaries.view(summary)
+
+
+@app.get(
+    "/api/v1/analyses/{analysis_id}",
+    response_model=AnalysisSnapshot,
+)
+async def get_analysis(analysis_id: str) -> AnalysisSnapshot:
+    job = analyses.get(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return analyses.view(job)
+
+
+@app.get("/api/v1/analyses/{analysis_id}/result", response_model=AnalysisResult)
+async def get_analysis_result(analysis_id: str) -> AnalysisResult:
+    job = analyses.get(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    result = analyses.result(job)
+    if not result:
+        raise AnalysisError(
+            "ANALYSIS_NOT_READY",
+            "The canonical analysis is not ready yet.",
+            True,
+        )
+    return result
+
+
+@app.post(
+    "/api/v1/analyses/{analysis_id}/artifacts",
+    response_model=ArtifactView,
+    status_code=202,
+)
+async def request_analysis_artifact(
+    analysis_id: str, payload: RequestArtifactRequest
+) -> ArtifactView:
+    job = analyses.get(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    artifact = await analyses.request_artifact(job, ArtifactKind(payload.kind))
+    return analyses.artifact_view(artifact)
+
+
+@app.get("/api/v1/analyses/{analysis_id}/artifacts/{kind}")
+async def get_analysis_artifact(analysis_id: str, kind: ArtifactKind):
+    job = analyses.get(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    artifact = job.artifacts[kind]
+    if artifact.status != ArtifactStatus.COMPLETED or artifact.payload is None:
+        raise AnalysisError(
+            "ARTIFACT_NOT_READY",
+            "This knowledge artifact is not ready yet.",
+            artifact.status in {ArtifactStatus.QUEUED, ArtifactStatus.RUNNING},
+        )
+    payload = artifact.payload
+    if isinstance(payload, list):
+        return [item.model_dump(mode="json") for item in payload]
+    return payload.model_dump(mode="json")
+
+
+@app.get("/api/v1/analyses/{analysis_id}/frames/{frame_id}")
+async def get_analysis_frame(analysis_id: str, frame_id: str):
+    job = analyses.get(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    path = job.frame_paths.get(frame_id)
+    if (
+        not path
+        or not path.is_file()
+        or not path.resolve().is_relative_to(job.directory.resolve())
+    ):
+        raise HTTPException(status_code=404, detail="Frame not found")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.get("/api/v1/analyses/{analysis_id}/artifacts/{kind}/export")
+async def export_analysis_artifact(
+    analysis_id: str,
+    kind: ArtifactKind,
+    format: Literal["json", "markdown", "html", "zip"] = Query("json"),
+    theme: WebsiteTheme | None = Query(None),
+):
+    job = analyses.get(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    artifact = job.artifacts[kind]
+    if artifact.status != ArtifactStatus.COMPLETED or artifact.payload is None:
+        raise AnalysisError(
+            "ARTIFACT_NOT_READY",
+            "This knowledge artifact is not ready yet.",
+            True,
+        )
+    payload = artifact.payload
+    filename = f"bubble-{kind.value}"
+    if format == "json":
+        body = export_json(payload)
+        return Response(
+            body,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.json"'},
+        )
+    if format == "markdown":
+        body = export_markdown(kind, payload)
+        return Response(
+            body,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}.md"'},
+        )
+    if kind != ArtifactKind.DYNAMIC_WEBSITE or not isinstance(
+        payload, WebsiteManifest
+    ):
+        raise AnalysisError(
+            "EXPORT_UNSUPPORTED",
+            "This export format is only available for Dynamic Website.",
+        )
+    if format == "html":
+        return Response(
+            render_website_html(payload, theme=theme),
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="index.html"'},
+        )
+    return Response(
+        export_website_zip(payload, theme=theme),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="bubble-website.zip"'},
+    )
 
 
 @app.get("/api/v1/jobs/{job_id}/events")
@@ -321,6 +527,20 @@ async def summary_events(summary_id: str, request: Request):
     after = int(last_id) if last_id.isdigit() else 0
     return StreamingResponse(
         summaries.stream(summary, after),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/v1/analyses/{analysis_id}/events")
+async def analysis_events(analysis_id: str, request: Request):
+    job = analyses.get(analysis_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    last_id = request.headers.get("Last-Event-ID", "0")
+    after = int(last_id) if last_id.isdigit() else 0
+    return StreamingResponse(
+        analyses.stream(job, after),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -358,4 +578,18 @@ async def cancel_job(job_id: str):
 async def cancel_summary(summary_id: str):
     if not await summaries.cancel(summary_id):
         raise HTTPException(status_code=404, detail="Summary not found")
+    return None
+
+
+@app.post("/api/v1/analyses/{analysis_id}/cancel", status_code=204)
+async def cancel_analysis(analysis_id: str):
+    if not await analyses.cancel(analysis_id):
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return None
+
+
+@app.delete("/api/v1/analyses/{analysis_id}", status_code=204)
+async def delete_analysis(analysis_id: str):
+    if not await analyses.delete(analysis_id):
+        raise HTTPException(status_code=404, detail="Analysis not found")
     return None

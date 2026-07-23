@@ -118,6 +118,17 @@ class Settings:
     summary_job_ttl_seconds: int = _int("SAVEBOLT_SUMMARY_JOB_TTL_SECONDS", 30 * 60)
     summary_request_timeout_seconds: int = _int("SAVEBOLT_SUMMARY_REQUEST_TIMEOUT_SECONDS", 60)
     summary_chunk_characters: int = _int("SAVEBOLT_SUMMARY_CHUNK_CHARACTERS", 12_000)
+    analysis_worker_concurrency: int = _int("SAVEBOLT_ANALYSIS_WORKER_CONCURRENCY", 2)
+    analysis_job_ttl_seconds: int = _int("SAVEBOLT_ANALYSIS_JOB_TTL_SECONDS", 30 * 60)
+    analysis_semantic_unit_characters: int = _int(
+        "SAVEBOLT_ANALYSIS_SEMANTIC_UNIT_CHARACTERS", 4_000
+    )
+    analysis_provider_chunk_characters: int = _int(
+        "SAVEBOLT_ANALYSIS_PROVIDER_CHUNK_CHARACTERS", 24_000
+    )
+    analysis_max_mind_map_nodes: int = _int("SAVEBOLT_ANALYSIS_MAX_MIND_MAP_NODES", 80)
+    analysis_max_mind_map_depth: int = _int("SAVEBOLT_ANALYSIS_MAX_MIND_MAP_DEPTH", 5)
+    analysis_visual_story_frames: int = _int("SAVEBOLT_ANALYSIS_VISUAL_STORY_FRAMES", 8)
     deepseek_api_key: str | None = field(
         default=_optional_text("DEEPSEEK_API_KEY"), repr=False
     )
@@ -198,6 +209,17 @@ class Settings:
             >= self.transcription_chunk_seconds
         ):
             raise ValueError("Transcription limits must be positive and overlap must be smaller than a chunk")
+        if (
+            self.analysis_worker_concurrency <= 0
+            or self.analysis_job_ttl_seconds <= 0
+            or self.analysis_semantic_unit_characters < 500
+            or self.analysis_provider_chunk_characters
+            < self.analysis_semantic_unit_characters
+            or not 10 <= self.analysis_max_mind_map_nodes <= 80
+            or not 2 <= self.analysis_max_mind_map_depth <= 5
+            or not 6 <= self.analysis_visual_story_frames <= 12
+        ):
+            raise ValueError("Analysis limits are invalid")
 
     @property
     def transcription_configured(self) -> bool:

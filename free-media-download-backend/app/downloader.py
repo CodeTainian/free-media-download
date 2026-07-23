@@ -692,10 +692,15 @@ class YtDlpService:
         if cancel_event.is_set():
             raise DownloadError("CANCELLED", "The summary job was cancelled.")
 
-        summary_root = (self.config.data_dir / "summaries").resolve()
+        allowed_roots = (
+            (self.config.data_dir / "summaries").resolve(),
+            (self.config.data_dir / "analyses").resolve(),
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
         resolved_output = output_dir.resolve()
-        if not resolved_output.is_relative_to(summary_root):
+        if not any(
+            resolved_output.is_relative_to(root) for root in allowed_roots
+        ):
             raise DownloadError(
                 "AUDIO_EXTRACTION_FAILED",
                 "The temporary audio workspace is invalid.",

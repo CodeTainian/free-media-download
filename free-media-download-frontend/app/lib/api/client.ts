@@ -1,5 +1,13 @@
 import type {
   ApiError,
+  AnalysisDetail,
+  AnalysisLanguage,
+  AnalysisResult,
+  AnalysisSnapshot,
+  ArtifactKind,
+  ArtifactPayloadMap,
+  ArtifactView,
+  CreateAnalysisResponse,
   CreateDownloadJobResponse,
   CreateSummaryJobResponse,
   DownloadJobSnapshot,
@@ -127,4 +135,67 @@ export function cancelSummaryJob(id: string) {
   return requestVoid(`/api/v1/summaries/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
+}
+
+export function createAnalysis(
+  item: MediaSelection,
+  options: { detail: AnalysisDetail; outputLanguage: AnalysisLanguage },
+) {
+  return requestJson<CreateAnalysisResponse>("/api/v1/analyses", {
+    method: "POST",
+    body: JSON.stringify({
+      url: item.source_url,
+      title: item.title,
+      output_language: options.outputLanguage,
+      detail: options.detail,
+      rights_confirmed: true,
+    }),
+  });
+}
+
+export function getAnalysis(id: string) {
+  return requestJson<AnalysisSnapshot>(
+    `/api/v1/analyses/${encodeURIComponent(id)}`,
+  );
+}
+
+export function getAnalysisResult(id: string) {
+  return requestJson<AnalysisResult>(
+    `/api/v1/analyses/${encodeURIComponent(id)}/result`,
+  );
+}
+
+export function requestArtifact(id: string, kind: ArtifactKind) {
+  return requestJson<ArtifactView>(
+    `/api/v1/analyses/${encodeURIComponent(id)}/artifacts`,
+    {
+      method: "POST",
+      body: JSON.stringify({ kind }),
+    },
+  );
+}
+
+export function getArtifact<K extends ArtifactKind>(id: string, kind: K) {
+  return requestJson<ArtifactPayloadMap[K]>(
+    `/api/v1/analyses/${encodeURIComponent(id)}/artifacts/${kind}`,
+  );
+}
+
+export function cancelAnalysis(id: string) {
+  return requestVoid(`/api/v1/analyses/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  });
+}
+
+export function artifactExportUrl(
+  id: string,
+  kind: ArtifactKind,
+  format: "json" | "markdown" | "html" | "zip",
+  theme?: string,
+) {
+  const query = new URLSearchParams({ format });
+  if (theme) query.set("theme", theme);
+  return apiUrl(
+    `/api/v1/analyses/${encodeURIComponent(id)}/artifacts/${kind}/export?${query}`,
+  );
 }

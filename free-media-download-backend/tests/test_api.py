@@ -41,6 +41,8 @@ def test_health_has_stable_shape():
         "request_impersonation",
         "transcription",
         "transcription_provider",
+        "analysis",
+        "analysis_provider",
     }
 
 

@@ -12,8 +12,17 @@ import { AlertBanner } from "../ui/alert-banner";
 const uploadEnabled = process.env.NEXT_PUBLIC_ENABLE_UPLOAD === "true";
 
 export function BubbleInput() {
-  const { locale, dictionary, download, summary, startAnalysis, openWorkspace } =
-    useBubbleExperience();
+  const {
+    locale,
+    dictionary,
+    download,
+    analysis,
+    analysisPreferences,
+    setAnalysisDetail,
+    setAnalysisLanguage,
+    startAnalysis,
+    openWorkspace,
+  } = useBubbleExperience();
   const [sourceMode, setSourceMode] = useState<SourceMode>("url");
   const [clipboardError, setClipboardError] = useState<ApiError | null>(null);
   const platform = useMemo(() => detectPlatform(download.input), [download.input]);
@@ -138,6 +147,43 @@ export function BubbleInput() {
             </span>
           </div>
 
+          <div
+            className="analysis-options"
+            aria-label={dictionary.input.analysisOptions}
+          >
+            <label>
+              <span>{dictionary.input.detail}</span>
+              <select
+                value={analysisPreferences.detail}
+                onChange={(event) =>
+                  setAnalysisDetail(
+                    event.target.value as typeof analysisPreferences.detail,
+                  )
+                }
+              >
+                <option value="concise">{dictionary.input.concise}</option>
+                <option value="balanced">{dictionary.input.balanced}</option>
+                <option value="detailed">{dictionary.input.detailed}</option>
+              </select>
+            </label>
+            <label>
+              <span>{dictionary.input.outputLanguage}</span>
+              <select
+                value={analysisPreferences.outputLanguage}
+                onChange={(event) =>
+                  setAnalysisLanguage(
+                    event.target
+                      .value as typeof analysisPreferences.outputLanguage,
+                  )
+                }
+              >
+                <option value="auto">{dictionary.input.languageAuto}</option>
+                <option value="en">{dictionary.input.languageEnglish}</option>
+                <option value="zh-CN">{dictionary.input.languageChinese}</option>
+              </select>
+            </label>
+          </div>
+
           {clipboardError ? (
             <AlertBanner
               dismissLabel={dictionary.common.close}
@@ -171,7 +217,7 @@ export function BubbleInput() {
               <MediaResults
                 items={download.items}
                 dictionary={dictionary}
-                summaryStarting={summary.starting}
+                summaryStarting={analysis.starting}
                 onAnalyze={startAnalysis}
                 onPresetChange={download.updatePreset}
                 onApply1080={() => download.applyPresetToAll("mp4-1080")}
@@ -193,7 +239,7 @@ export function BubbleInput() {
             </ActionButton>
           )}
 
-          {summary.source ? (
+          {analysis.source ? (
             <button className="open-workspace-button" type="button" onClick={openWorkspace}>
               {dictionary.input.openWorkspace}
               <span aria-hidden="true">→</span>

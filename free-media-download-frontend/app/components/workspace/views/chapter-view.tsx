@@ -1,13 +1,14 @@
 import { durationLabel, timestampUrl } from "../../../lib/api/format";
-import type { SummaryResult } from "../../../lib/api/types";
+import type { Chapter } from "../../../lib/api/types";
 import type { BubbleDictionary } from "../../../lib/i18n/messages/en-US";
-import { EvidenceList } from "../evidence-list";
 
 export function ChapterView({
-  result,
+  chapters,
+  sourceUrl,
   dictionary,
 }: {
-  result: SummaryResult;
+  chapters: Chapter[];
+  sourceUrl: string;
   dictionary: BubbleDictionary;
 }) {
   return (
@@ -17,8 +18,8 @@ export function ChapterView({
         <h2>{dictionary.workspace.chaptersHeading}</h2>
       </header>
       <ol className="chapter-list">
-        {result.outline.map((chapter, index) => (
-          <li id={`chapter-${index}`} key={`${chapter.timestamp_seconds}-${chapter.title}`}>
+        {chapters.map((chapter, index) => (
+          <li id={chapter.id} key={chapter.id}>
             <div className="chapter-marker">
               <span>{String(index + 1).padStart(2, "0")}</span>
               <i aria-hidden="true" />
@@ -26,20 +27,20 @@ export function ChapterView({
             <div className="chapter-content">
               <a
                 className="timestamp-link"
-                href={timestampUrl(result.source_url, chapter.timestamp_seconds)}
+                href={timestampUrl(sourceUrl, chapter.start_seconds)}
                 target="_blank"
                 rel="noreferrer"
               >
-                {durationLabel(chapter.timestamp_seconds)} ↗
+                {durationLabel(chapter.start_seconds)} –{" "}
+                {durationLabel(chapter.end_seconds)} ↗
               </a>
               <h3>{chapter.title}</h3>
-              <p>{chapter.summary}</p>
-              <EvidenceList
-                evidence={chapter.evidence}
-                sourceUrl={result.source_url}
-                language={result.caption_language}
-                dictionary={dictionary}
-              />
+              <p>{chapter.summary.text}</p>
+              <ul className="chapter-key-points">
+                {chapter.key_points.map((point, pointIndex) => (
+                  <li key={`${chapter.id}-${pointIndex}`}>{point.text}</li>
+                ))}
+              </ul>
             </div>
           </li>
         ))}

@@ -48,7 +48,6 @@ export function ArtifactTabs({
     <div className="artifact-tabs" role="tablist" aria-label={dictionary.workspace.title}>
       {artifactKinds.map((kind, index) => {
         const current = active === kind;
-        const isPreview = !["summary", "chapters"].includes(kind);
         return (
           <button
             key={kind}
@@ -66,7 +65,6 @@ export function ArtifactTabs({
             onKeyDown={(event) => moveFocus(event, index)}
           >
             <span>{dictionary.workspace.tabs[kind]}</span>
-            {isPreview ? <small>{dictionary.common.preview}</small> : null}
           </button>
         );
       })}

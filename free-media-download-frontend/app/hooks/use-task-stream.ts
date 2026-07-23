@@ -12,7 +12,8 @@ type TaskStreamOptions<TSnapshot, TPayload extends SequencedPayload> = {
   parse: (value: string) => TPayload | null;
   getSnapshot: () => Promise<TSnapshot>;
   onUpdate: (snapshot: TSnapshot) => void;
-  snapshotFromPayload: (payload: TPayload) => TSnapshot;
+  snapshotFromPayload: (payload: TPayload) => TSnapshot | null;
+  onEvent?: (payload: TPayload) => void;
   isTerminal: (snapshot: TSnapshot) => boolean;
   onExhausted?: () => void;
 };
@@ -29,6 +30,7 @@ export function useTaskStream<TSnapshot, TPayload extends SequencedPayload>({
   snapshotFromPayload,
   isTerminal,
   onExhausted,
+  onEvent,
 }: TaskStreamOptions<TSnapshot, TPayload>) {
   const callbacks = useRef({
     parse,
@@ -37,6 +39,7 @@ export function useTaskStream<TSnapshot, TPayload extends SequencedPayload>({
     snapshotFromPayload,
     isTerminal,
     onExhausted,
+    onEvent,
   });
 
   useEffect(() => {
@@ -47,6 +50,7 @@ export function useTaskStream<TSnapshot, TPayload extends SequencedPayload>({
       snapshotFromPayload,
       isTerminal,
       onExhausted,
+      onEvent,
     };
   });
 
@@ -76,9 +80,12 @@ export function useTaskStream<TSnapshot, TPayload extends SequencedPayload>({
         if (!payload || payload.sequence <= lastSequence) return;
         lastSequence = payload.sequence;
         reconnectAttempt = 0;
+        callbacks.current.onEvent?.(payload);
         const snapshot = callbacks.current.snapshotFromPayload(payload);
-        callbacks.current.onUpdate(snapshot);
-        if (callbacks.current.isTerminal(snapshot)) closeSource();
+        if (snapshot) {
+          callbacks.current.onUpdate(snapshot);
+          if (callbacks.current.isTerminal(snapshot)) closeSource();
+        }
       };
 
       eventNames.forEach((eventName) => source?.addEventListener(eventName, handle));

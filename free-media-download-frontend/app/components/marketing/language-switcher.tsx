@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { otherLocale, type Locale } from "../../lib/i18n/locales";
 import type { BubbleDictionary } from "../../lib/i18n/messages/en-US";
 
@@ -13,10 +13,13 @@ export function LanguageSwitcher({
   dictionary: BubbleDictionary;
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const nextLocale = otherLocale(locale);
   const segments = pathname.split("/");
   segments[1] = nextLocale;
-  const href = segments.join("/") || `/${nextLocale}`;
+  const path = segments.join("/") || `/${nextLocale}`;
+  const query = searchParams.toString();
+  const href = query ? `${path}?${query}` : path;
 
   return (
     <Link

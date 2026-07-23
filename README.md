@@ -1,6 +1,6 @@
 # SaveBolt
 
-SaveBolt is a local-first MVP for saving and understanding public media that the user owns or is authorized to process. It supports single links, batches of up to ten items, mobile-compatible MP4, source-quality video, MP3 audio, per-file downloads, and ZIP bundles. Public YouTube and Bilibili videos up to two hours can also be turned into an English AI overview, timeline, key points, and linked original-language evidence. The analysis pipeline prefers captions and can fall back to configured audio transcription when captions are unavailable. Its URL catalog covers 60+ platform families across mainland China and the rest of the world.
+SaveBolt is a local-first MVP for saving and understanding public media that the user owns or is authorized to process. It supports single links, batches of up to ten items, mobile-compatible MP4, source-quality video, MP3 audio, per-file downloads, and ZIP bundles. Public YouTube and Bilibili videos up to two hours can also be turned into an English or Simplified Chinese structured analysis with Summary, Chapters, Mind Map, Visual Story, Dynamic Website, Interactive Guide, Transcript, and linked source evidence. The analysis pipeline prefers captions and can fall back to configured audio transcription when captions are unavailable. Its URL catalog covers 60+ platform families across mainland China and the rest of the world.
 
 It does **not** accept cookies from API clients or bypass DRM, paywalls, private media, or access controls. For public Douyin links, the API can create an isolated anonymous Chromium session automatically; an operator may also opt in to yt-dlp's official browser-cookie or cookie-file integration for selected platforms. Neither path passes cookie data through the public API.
 
@@ -21,7 +21,7 @@ The completed video-download MVP, its engineering decisions, validation evidence
 
 The API accepts only server-defined presets. Platform URLs are passed to pinned `yt-dlp==2026.7.4` without a shell and with the generic extractor disabled. The API image also carries the pinned Node 24 runtime required by current yt-dlp YouTube extraction and Chromium for isolated anonymous Douyin sessions. Public direct-media links use a separate downloader that validates and pins public DNS results for every redirect, blocking loopback, private, link-local, reserved, and cloud-metadata destinations.
 
-Download and summary job state is held in memory. Temporary audio is deleted as soon as an analysis task ends. Completed files, captions, transcripts, and summary results remain available for 30 minutes by default and are then removed. Restarting the API clears active job state.
+Download, summary, analysis, and artifact state is held in memory. Temporary audio and frame-extraction source video are deleted as soon as their processing stage ends. Completed files, transcripts, structured results, and representative frames remain available for 30 minutes by default and are then removed. Restarting the API clears active job state.
 
 ## Run with Docker
 
@@ -85,13 +85,17 @@ forwards them to `SAVEBOLT_API_ORIGIN`, which defaults to `http://127.0.0.1:8000
 preview-container, IPv4/IPv6, and CORS differences around `localhost`. Set
 `NEXT_PUBLIC_API_BASE_URL` only when the browser must call a separately hosted public API directly.
 
-### AI summaries
+### Bubble Workspace analysis
 
-Set a fresh `DEEPSEEK_API_KEY` in the backend environment to enable AI Summary. The default model is `deepseek-v4-flash` and can be changed with `DEEPSEEK_MODEL`. Bubble Video AI always prefers server-selected manual VTT/SRT captions, then automatic captions. When none are available, public YouTube and Bilibili audio can be normalized and transcribed if `TRANSCRIPTION_PROVIDER=openai_compatible` and `TRANSCRIPTION_API_KEY` are configured. The default transcription model is `whisper-1`; provider base URL, timeouts, duration, upload-size, and chunk limits are operator-controlled through the variables in the backend environment example. No provider key, media path, caption URL, Cookie, or yt-dlp argument is accepted from the client.
+Set a fresh `DEEPSEEK_API_KEY` in the backend environment to enable the structured Bubble Workspace analysis pipeline. The default model is `deepseek-v4-flash` and can be changed with `DEEPSEEK_MODEL`. One canonical, evidence-grounded analysis produces Summary and Chapters; Mind Map, Visual Story, Dynamic Website, and Interactive Guide are derived and cached on demand. The provider only returns strict JSON—HTML, CSS, and JavaScript are never accepted as model output.
+
+Bubble Video AI always prefers server-selected manual VTT/SRT captions, then automatic captions. When none are available, public YouTube and Bilibili audio can be normalized and transcribed if `TRANSCRIPTION_PROVIDER=openai_compatible` and `TRANSCRIPTION_API_KEY` are configured. The default transcription model is `whisper-1`; provider base URL, timeouts, duration, upload-size, and chunk limits are operator-controlled through the variables in the backend environment example. No provider key, media path, caption URL, Cookie, or yt-dlp argument is accepted from the client.
 
 The no-caption path converts extracted audio to mono 16 kHz PCM WAV chunks, preserves chunk offsets when rebuilding global timestamps, and deletes its isolated audio directory on success, failure, cancellation, or timeout. The default limit is five created summary tasks per source IP in a rolling 24-hour window. The legacy `/api/v1/summaries` response remains compatible; `caption_source` can now also be `audio_transcription`.
 
-The web UI shows AI Summary only after media analysis. It explains why the action is unavailable when a platform or public audio track is unsupported, transcription is not configured, or the video exceeds two hours. While a task runs, the UI follows source probing, caption selection, optional audio extraction/preparation/transcription, transcript parsing, summarizing, chapter generation, and evidence finalization over SSE; completed citations link back to the source timestamp.
+The structured API starts at `POST /api/v1/analyses`. Snapshots, canonical results, and SSE are available at `/api/v1/analyses/{id}`, `/result`, and `/events`. Summary, Chapters, and Transcript are core artifacts. `POST /api/v1/analyses/{id}/artifacts` lazily creates Mind Map, Visual Story, Dynamic Website, or Interactive Guide; each artifact has an independent state and can be fetched or exported without regenerating the transcript. Static website export uses a controlled manifest renderer with four server-owned templates and a restrictive Content Security Policy.
+
+The web UI explains why analysis is unavailable when a platform or public audio track is unsupported, transcription is not configured, or the video exceeds two hours. While a task runs, it follows transcript acquisition, semantic segmentation, canonical analysis, structured validation, and artifact generation over SSE. Completed citations link back to source timestamps, and an unexpired workspace can be restored from its analysis URL.
 
 ## Validation
 
@@ -101,7 +105,7 @@ PYTHONPATH=free-media-download-backend free-media-download-backend/.venv/bin/pyt
 docker compose config
 ```
 
-The automated suites cover URL allowlisting and SSRF protection, similar-domain attacks, format mapping, file-size limits, cancellation, timeouts, SSE ordering, partial failure, ZIP creation, TTL cleanup, rate limiting, caption parsing and selection, audio normalization and chunk offsets, transcription provider error mapping and secret hygiene, summary chunking and evidence validation, summary lifecycle handling, legal pages, launch claims, and SSR output.
+The automated suites cover URL allowlisting and SSRF protection, similar-domain attacks, format mapping, file-size limits, cancellation, timeouts, SSE ordering and replay, partial artifact failure, ZIP creation, TTL cleanup, rate limiting, caption parsing and selection, audio normalization and chunk offsets, provider error mapping and secret hygiene, canonical structured-output validation, evidence IDs, chapter overlap, mind-map cycles and limits, website XSS and URL safety, lazy task reuse, bilingual generation, keyboard interaction, responsive fallback structures, legal pages, launch claims, and SSR output.
 
 ## Runtime limits
 
